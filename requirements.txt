@@ -1,0 +1,11 @@
+# Core runtime dependencies:
+# printer-craft is designed with zero third-party dependencies,
+# utilizing Python's standard library (3.9+) and macOS/Linux native CUPS binaries.
+
+# Development, testing, and packaging dependencies:
+pytest>=7.4.0
+pytest-cov>=4.1.0
+build>=1.0.0
+twine>=4.0.0
+wheel>=0.40.0
+ruff>=0.1.0
