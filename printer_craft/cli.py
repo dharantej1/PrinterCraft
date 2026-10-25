@@ -124,15 +124,15 @@ def _add_print_arguments(parser: argparse.ArgumentParser) -> None:
         "--fit-to-page", "--fit-to-pages",
         dest="fit_to_page",
         action="store_true",
-        help="Scale document to fit sheet",
+        help="Scale document to fit sheet (default: enabled, matching PdfCraft)",
     )
     fit_group.add_argument(
         "--no-fit-to-page", "--no-fit-to-pages",
         dest="fit_to_page",
         action="store_false",
-        help="Disable fit to page",
+        help="Disable fit to page and print at 100% actual size (unscaled)",
     )
-    parser.set_defaults(fit_to_page=None)
+    parser.set_defaults(fit_to_page=True)
 
     # Scaling
     parser.add_argument(
