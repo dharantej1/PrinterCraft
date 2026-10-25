@@ -120,8 +120,18 @@ def _add_print_arguments(parser: argparse.ArgumentParser) -> None:
 
     # Fit to page
     fit_group = parser.add_mutually_exclusive_group()
-    fit_group.add_argument("--fit-to-page", dest="fit_to_page", action="store_true", help="Scale document to fit sheet")
-    fit_group.add_argument("--no-fit-to-page", dest="fit_to_page", action="store_false", help="Disable fit to page")
+    fit_group.add_argument(
+        "--fit-to-page", "--fit-to-pages",
+        dest="fit_to_page",
+        action="store_true",
+        help="Scale document to fit sheet",
+    )
+    fit_group.add_argument(
+        "--no-fit-to-page", "--no-fit-to-pages",
+        dest="fit_to_page",
+        action="store_false",
+        help="Disable fit to page",
+    )
     parser.set_defaults(fit_to_page=None)
 
     # Scaling
@@ -129,6 +139,13 @@ def _add_print_arguments(parser: argparse.ArgumentParser) -> None:
         "--scaling",
         choices=["auto", "auto-fit", "fit-to-page", "fill", "none"],
         help="CUPS print scaling algorithm",
+    )
+
+    # Repeat document
+    parser.add_argument(
+        "-R", "--repeat",
+        type=int,
+        help="Repeat document/pages N times (e.g. --repeat 4 for n-up imposition)",
     )
 
     # Number Up (N-Up)
@@ -192,6 +209,7 @@ def handle_print(args: argparse.Namespace, mgr: PrinterManager) -> int:
         fit_to_page=args.fit_to_page,
         scaling=PrintScaling(args.scaling) if args.scaling else None,
         number_up=args.number_up,
+        repeat=args.repeat,
         raw_options=raw_dict,
         dry_run=args.dry_run,
     )

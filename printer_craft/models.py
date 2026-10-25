@@ -141,6 +141,7 @@ class PrintJobOptions:
     fit_to_page: Optional[bool] = None
     scaling: Optional[PrintScaling] = None
     number_up: Optional[int] = None
+    repeat: Optional[int] = None
     raw_options: Dict[str, str] = field(default_factory=dict)
     dry_run: bool = False
 

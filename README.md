@@ -20,11 +20,13 @@ The core communication architecture was **reverse-engineered from the native mac
   - Collation (`--collate` / `--no-collate`)
   - Color mode (`monochrome` / `color`)
   - Paper size (`Letter`, `Legal`, `A4`, `A3`, `Custom`, etc.)
-  - Page ranges (`1-5`, `2,4,8`)
+  - Page ranges & sequences (`1-5`, `2,4,8`, or repeated `1,1,1,1`)
+  - Page repetition & imposition (`--repeat 4` / `-R 4` for multi-copy n-up)
   - Orientation (`portrait`, `landscape`, `reverse-landscape`, `reverse-portrait`)
   - N-Up printing (`1`, `2`, `4`, `6`, `9`, `16` pages per sheet)
   - Scaling & fit-to-page (`auto-fit`, `fit-to-page`, `fill`)
   - Custom hardware PPD keys (`-o InputSlot=Manual`, `-o pjlDensity=3`)
+- **Intelligent Page Imposition**: Automatically duplicates/rearranges PDF pages via native macOS `PDFKit` (JXA) when repeating pages, bypassing the CUPS `Bad page-ranges values` limitation.
 - **Safe Dry-Run Mode**: Inspect generated CUPS commands without sending jobs to physical hardware.
 - **Queue Management**: Inspect active print queues and cancel pending jobs.
 - **Zero Heavy Dependencies**: Pure Python using standard library and operating system CUPS binaries.
@@ -73,6 +75,16 @@ printer-craft print report.pdf \
   --duplex two-sided-long-edge \
   --color monochrome \
   --media A4
+
+# Print 4 copies of a 1-page document back-to-back on 1 sheet (2 copies per side):
+printer-craft print ApplicationForm.pdf \
+  --repeat 4 \
+  -N 2 \
+  --duplex two-sided-short-edge \
+  --fit-to-page
+
+# Alternatively using page sequence:
+printer-craft print ApplicationForm.pdf --pages 1,1,1,1 -N 2 --duplex two-sided-short-edge
 
 # Print specific pages with 2-up layout:
 printer-craft print slides.pdf --pages 1-10 -N 2 --orientation landscape
@@ -211,9 +223,10 @@ result = mgr.print_bytes(
 | **Collation** | `--collate` / `--no-collate` | `options.collate = bool` | `-o collate=true / false` |
 | **Color Mode** | `--color <mode>` | `ColorMode.MONOCHROME`<br>`ColorMode.COLOR` | `-o print-color-mode=monochrome`<br>`-o print-color-mode=color` |
 | **Paper Size** | `-m, --media <size>` | `options.media = str` | `-o media=<size>` |
-| **Page Range** | `-p, --pages <range>` | `options.page_ranges = str` | `-o page-ranges=<range>` |
+| **Page Range** | `-p, --pages <range>` | `options.page_ranges = str` | `-o page-ranges=<range>` *(or PDFKit duplicated if repeating)* |
+| **Repeat / Imposition** | `-R, --repeat <int>` | `options.repeat = int` | *(Duplicated via PDFKit before spooling)* |
 | **Orientation** | `--orientation <orient>` | `Orientation.PORTRAIT`<br>`Orientation.LANDSCAPE`<br>`Orientation.REVERSE_LANDSCAPE`<br>`Orientation.REVERSE_PORTRAIT` | `-o orientation-requested=3`<br>`-o orientation-requested=4`<br>`-o orientation-requested=5`<br>`-o orientation-requested=6` |
-| **Fit to Page** | `--fit-to-page` | `options.fit_to_page = bool` | `-o fit-to-page=true / false` |
+| **Fit to Page** | `--fit-to-page`, `--fit-to-pages` | `options.fit_to_page = bool` | `-o fit-to-page=true / false` |
 | **Scaling** | `--scaling <mode>` | `PrintScaling.AUTO_FIT`<br>`PrintScaling.FIT_TO_PAGE`<br>`PrintScaling.FILL` | `-o print-scaling=<mode>` |
 | **N-Up (Pages/Sheet)** | `-N, --number-up <int>` | `options.number_up = 1,2,4,6,9,16` | `-o number-up=<int>` |
 | **Custom PPD Options** | `-o <key>=<value>` | `options.raw_options = dict` | `-o <key>=<value>` |

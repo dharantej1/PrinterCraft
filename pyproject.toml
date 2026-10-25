@@ -33,7 +33,16 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=7.0",
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "ruff>=0.1.9",
+    "build>=1.0.3",
+    "twine>=4.0.2",
+    "wheel>=0.42.0",
+]
+extras = [
+    "pypdf>=3.17.0",
+    "Pillow>=10.2.0",
 ]
 
 [project.scripts]

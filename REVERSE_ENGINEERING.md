@@ -140,6 +140,29 @@ PdfCraft`craft_print::lp_args:
 
 ---
 
+### Step 5: Page Imposition & Multi-Copy Layout (`pdfcraft_print::impose`)
+
+During disassembly of `pdfcraft_print`, symbols like `pdfcraft_print::impose` (0x10101c194) and `pdfcraft_print::layout` (0x1010205b4) were identified alongside strings such as:
+- `invalid number of pages per sheet`
+- `page size cannot be scaled to the grid`
+- `Poster`, `Booklet`, `Label`, `Fit`, `Shrink oversized pages`
+- `Page order: Horizontal reversed...`
+- `Both sides`, `Front side only`, `Back side only`
+
+#### Why Pre-Spooling Imposition is Required:
+A key limitation of the UNIX CUPS `lp` subsystem is that `-o page-ranges` only accepts strictly monotonic, non-repeating page numbers (e.g. `1-3,5`). Passing repeated ranges like `1,1,1,1` causes CUPS to abort with:
+```text
+/usr/bin/lp: Bad page-ranges values 1-1.
+```
+Furthermore, CUPS's native `-o number-up=2` only collates consecutive pages *within a single copy* of a document. For a 1-page document, `-n 4 -o number-up=2` prints 4 separate sheets with half of each sheet blank, rather than 4 copies packed onto 1 sheet.
+
+To overcome this, `PdfCraft` and `printer-craft` perform pre-spooling page replication (using macOS's native `PDFKit` via JXA):
+1. Expands repeated page sequences (e.g. `[1, 1, 1, 1]` or `--repeat 4`) into an intermediate multi-page PDF.
+2. Submits the synthesized PDF to `lp` with `-o number-up=2` and `-o sides=two-sided-short-edge`.
+3. Results in exactly **2 copies on the front** and **2 copies on the back** of a single physical sheet.
+
+---
+
 ## 5. Architectural Takeaway
 
 The reverse engineering reveals that `PdfCraft.app`:

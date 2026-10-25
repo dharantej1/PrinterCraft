@@ -1,11 +1,23 @@
-# Core runtime dependencies:
-# printer-craft is designed with zero third-party dependencies,
-# utilizing Python's standard library (3.9+) and macOS/Linux native CUPS binaries.
+# ==============================================================================
+# printer-craft: Universal Document Printing Library & CLI
+# ==============================================================================
 
-# Development, testing, and packaging dependencies:
+# Core Runtime:
+# The core package runs with ZERO required third-party dependencies,
+# using the Python Standard Library (3.9+) and native CUPS/OS binaries.
+
+# Optional Document & Image Enhancements:
+# (Cross-platform PDF manipulation, imposition, and image decoding)
+pypdf>=3.17.0
+Pillow>=10.2.0
+
+# Development & Testing:
 pytest>=7.4.0
 pytest-cov>=4.1.0
-build>=1.0.0
-twine>=4.0.0
-wheel>=0.40.0
-ruff>=0.1.0
+ruff>=0.1.9
+
+# Package Building & PyPI Publishing:
+setuptools>=61.0.0
+wheel>=0.42.0
+build>=1.0.3
+twine>=4.0.2

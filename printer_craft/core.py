@@ -265,8 +265,35 @@ class PrinterManager:
         if not opts.title:
             opts.title = target_path.name
 
+        # Detect repeated/non-monotonic page ranges (e.g. "1,1,1,1")
+        # CUPS lp throws "Bad page-ranges" if pages repeat or aren't strictly increasing.
+        # We handle this transparently by duplicating pages via PDFKit before spooling.
+        page_sequence = None
+        if opts.page_ranges:
+            try:
+                tokens = [t.strip() for t in opts.page_ranges.split(",")]
+                parsed_pages = []
+                is_simple_list = True
+                for t in tokens:
+                    if "-" in t:
+                        is_simple_list = False
+                        break
+                    parsed_pages.append(int(t))
+                if is_simple_list and parsed_pages:
+                    # Check if there are duplicates or descending order
+                    if len(parsed_pages) != len(set(parsed_pages)) or parsed_pages != sorted(parsed_pages):
+                        page_sequence = parsed_pages
+                        # Clear from lp options so lp receives clean file
+                        opts.page_ranges = None
+            except Exception:
+                pass
+
+        if opts.repeat and opts.repeat > 1 and page_sequence is None:
+            # Repeat the document page(s)
+            page_sequence = [1] * opts.repeat
+
         with DocumentConverter.prepare_for_print(
-            target_path, force_pdf=force_pdf_conversion
+            target_path, force_pdf=force_pdf_conversion, page_sequence=page_sequence
         ) as printable_path:
             lp_args = opts.build_lp_args()
             cmd = [self.lp_bin] + lp_args + [str(printable_path)]

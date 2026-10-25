@@ -73,16 +73,35 @@ class DocumentConverter:
         cls,
         file_path: Union[str, Path],
         force_pdf: bool = False,
+        page_sequence: Optional[List[int]] = None,
     ) -> Generator[Path, None, None]:
         """
         Context manager that yields a path to a printable file.
-        If conversion is needed, a temporary file is created and cleaned up on exit.
+        If conversion or page duplication is needed, a temporary file is created and cleaned up on exit.
         """
         path = Path(file_path).expanduser().resolve()
         if not path.exists():
             raise FileNotFoundError(f"Document file does not exist: {path}")
 
         suffix = path.suffix.lower()
+
+        # If page sequence is requested (e.g. repeating pages), always generate a new PDF
+        if page_sequence is not None and len(page_sequence) > 0:
+            temp_dir = tempfile.mkdtemp(prefix="printer_craft_seq_")
+            output_pdf = Path(temp_dir) / f"{path.stem}_seq.pdf"
+            try:
+                # If source is already PDF, duplicate directly
+                if suffix == ".pdf":
+                    cls.duplicate_pdf_pages(path, output_pdf, page_sequence)
+                else:
+                    # Convert to PDF first, then duplicate
+                    temp_pdf = Path(temp_dir) / f"{path.stem}_base.pdf"
+                    cls._convert_to_base_pdf(path, suffix, temp_pdf)
+                    cls.duplicate_pdf_pages(temp_pdf, output_pdf, page_sequence)
+                yield output_pdf
+            finally:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            return
 
         # If it's already a PDF, return it directly
         if suffix == ".pdf":
@@ -99,19 +118,67 @@ class DocumentConverter:
         output_pdf = Path(temp_dir) / f"{path.stem}_converted.pdf"
 
         try:
-            if suffix in TEXTUTIL_EXTENSIONS:
-                cls._convert_textutil_to_pdf(path, output_pdf)
-            elif suffix in IMAGE_EXTENSIONS:
-                cls._convert_image_to_pdf(path, output_pdf)
-            elif cls._is_plain_text(path):
-                cls._convert_text_to_pdf(path, output_pdf)
-            else:
-                # Attempt cupsfilter fallback
-                cls._convert_via_cupsfilter(path, output_pdf)
-
+            cls._convert_to_base_pdf(path, suffix, output_pdf)
             yield output_pdf
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
+
+    @classmethod
+    def _convert_to_base_pdf(cls, path: Path, suffix: str, output_pdf: Path) -> None:
+        if suffix in TEXTUTIL_EXTENSIONS:
+            cls._convert_textutil_to_pdf(path, output_pdf)
+        elif suffix in IMAGE_EXTENSIONS:
+            cls._convert_image_to_pdf(path, output_pdf)
+        elif cls._is_plain_text(path):
+            cls._convert_text_to_pdf(path, output_pdf)
+        else:
+            cls._convert_via_cupsfilter(path, output_pdf)
+
+    @staticmethod
+    def duplicate_pdf_pages(input_path: Path, output_path: Path, page_sequence: List[int]) -> None:
+        """
+        Duplicate or rearrange pages in a PDF using pypdf (if installed)
+        or native macOS PDFKit (via JXA), avoiding CUPS 'Bad page-ranges' error.
+        """
+        # 1. Try pure-Python pypdf if available
+        try:
+            import pypdf
+            reader = pypdf.PdfReader(str(input_path))
+            writer = pypdf.PdfWriter()
+            total_pages = len(reader.pages)
+            for page_num in page_sequence:
+                idx = page_num - 1
+                if 0 <= idx < total_pages:
+                    writer.add_page(reader.pages[idx])
+            with open(output_path, "wb") as f_out:
+                writer.write(f_out)
+            return
+        except ImportError:
+            pass
+
+        # 2. Fallback to native macOS PDFKit via JXA (zero-dependency)
+        import json
+        script = f"""
+        ObjC.import('PDFKit');
+        var inDoc = $.PDFDocument.alloc.initWithURL($.NSURL.fileURLWithPath('{input_path}'));
+        var outDoc = $.PDFDocument.alloc.init;
+        var seq = {json.dumps([p - 1 for p in page_sequence])};
+        for (var i = 0; i < seq.length; i++) {{
+            var page = inDoc.pageAtIndex(seq[i]);
+            if (page) {{
+                outDoc.insertPageAtIndex(page.copy, i);
+            }}
+        }}
+        outDoc.writeToFile('{output_path}');
+        """
+        res = subprocess.run(
+            ["osascript", "-l", "JavaScript", "-e", script],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if res.returncode != 0 or not output_path.exists():
+            raise DocumentConversionError(f"Failed to duplicate PDF pages: {res.stderr.strip()}")
 
     @staticmethod
     def _convert_image_to_pdf(input_path: Path, output_pdf: Path) -> None:
