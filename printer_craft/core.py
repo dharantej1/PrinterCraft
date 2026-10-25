@@ -77,6 +77,11 @@ class PrinterManager:
             if check:
                 raise PrintExecutionError(err, return_code=124, command=cmd)
             return 124, "", err
+        except FileNotFoundError:
+            err = f"Command binary not found: {cmd[0]}"
+            if check:
+                raise SpoolerUnavailableError(err)
+            return 127, "", err
 
         if check and res.returncode != 0:
             err = res.stderr.strip() or res.stdout.strip()
@@ -102,6 +107,8 @@ class PrinterManager:
         if code != 0 and not stdout:
             if "spooler is not running" in stderr.lower() or "server-error" in stderr.lower():
                 raise SpoolerUnavailableError(f"CUPS print spooler error: {stderr.strip()}")
+            if code == 127 or "not found" in stderr.lower():
+                return []
 
         printers_dict: Dict[str, Printer] = {}
         default_printer_name: Optional[str] = None
@@ -255,11 +262,16 @@ class PrinterManager:
         if not target_printer:
             def_p = self.get_default_printer()
             if not def_p:
-                raise PrinterNotFoundError(
-                    "No default printer configured and no printer specified in options."
-                )
-            target_printer = def_p.name
-            opts.printer = target_printer
+                if opts.dry_run:
+                    target_printer = "DefaultPrinter"
+                    opts.printer = target_printer
+                else:
+                    raise PrinterNotFoundError(
+                        "No default printer configured and no printer specified in options."
+                    )
+            else:
+                target_printer = def_p.name
+                opts.printer = target_printer
 
         # If title is not set, default to document filename
         if not opts.title:
