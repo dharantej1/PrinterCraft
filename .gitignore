@@ -8,6 +8,7 @@ dist/
 build/
 *.egg-info/
 .eggs/
+printer_craft/_version.py
 
 # Virtual environments
 venv/

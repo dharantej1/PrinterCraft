@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=64", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "printer-craft"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Universal document printing library and CLI for macOS and Unix, reverse-engineered from PdfCraft.app"
 readme = "README.md"
 authors = [
@@ -32,6 +32,9 @@ dependencies = []
 
 [tool.setuptools.packages.find]
 include = ["printer_craft*"]
+
+[tool.setuptools_scm]
+version_file = "printer_craft/_version.py"
 
 [project.optional-dependencies]
 dev = [
