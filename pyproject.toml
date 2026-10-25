@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "printer-craft"
+version = "0.1.0"
+description = "Universal document printing library and CLI for macOS and Unix, reverse-engineered from PdfCraft.app"
+readme = "README.md"
+authors = [
+    { name = "Open Source Community" }
+]
+license = { text = "MIT" }
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Printing",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Utilities",
+]
+keywords = ["cups", "printing", "printer", "pdf", "macos", "reverse-engineering", "lp", "lpoptions"]
+requires-python = ">=3.9"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+]
+
+[project.scripts]
+printer-craft = "printer_craft.cli:main"
+printcraft = "printer_craft.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/example/printer-craft"
+Repository = "https://github.com/example/printer-craft"
+Issues = "https://github.com/example/printer-craft/issues"
