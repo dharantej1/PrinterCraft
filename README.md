@@ -212,25 +212,55 @@ result = mgr.print_bytes(
 
 ---
 
-## 📋 Passable Options Reference
+## 📋 Complete CLI & API Parameters Reference
 
-| Argument / Parameter | CLI Flag | Python Enum / Type | CUPS Flag Generated |
+### 1. `printer-craft print` Parameters
+
+| Parameter / Flag | Python Type | Default Value | Allowed Values | CUPS Flag Generated | Description |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **`document`** *(positional)* | `str` / `Path` | *(Required)* | Any valid file path (`.pdf`, `.docx`, `.png`, `.jpg`, `.txt`, etc.) | Direct file path argument | Path to the document or image to print. PDF files are spooled directly; other formats (Word, RTF, images, text) are automatically converted via macOS native tools (`cupsfilter`, `textutil`, `sips`). |
+| **`-d, --printer`** | `Optional[str]` | `None` *(resolves to system default)* | Any installed CUPS printer name (e.g. `HP_LaserJet_Professional_M1136_MFP`) | `-d <name>` | Destination printer name. Run `printer-craft list` to view all available printers on your machine. |
+| **`-n, --copies`** | `int` | `1` | `1` to `999` | `-n <int>` *(when > 1)* | Number of copies of the document to print. |
+| **`-t, --title`** | `Optional[str]` | `None` *(defaults to file name)* | Any text string (e.g. `"Q4 Report"`) | `-t "<title>"` | Print job title displayed in CUPS queues, active job monitors, and banner/cover pages. |
+| **`--fit-to-page`<br>`--no-fit-to-page`** | `Optional[bool]` | **`True`** *(Enabled by default)* | `--fit-to-page`<br>`--no-fit-to-page`<br>*(aliases: `--fit-to-pages`, `--no-fit-to-pages`)* | `-o fit-to-page=true`<br>`-o fit-to-page=false` | **Scale document to fit sheet.** Enabled by default (matching `PdfCraft.app`). Scales oversized documents (such as digital Aadhaar cards or long banners) or undersized pages proportionally so all content fits inside the printable area without being clipped or zoomed in. Use `--no-fit-to-page` to force 100% actual size unscaled output. |
+| **`--duplex`** | `Optional[DuplexMode]` | `None` *(printer PPD default, usually one-sided)* | `one-sided`<br>`two-sided-long-edge`<br>`two-sided-short-edge` | `-o sides=one-sided`<br>`-o sides=two-sided-long-edge`<br>`-o sides=two-sided-short-edge` | Two-sided printing mode: flips along the long edge (standard portrait book/turn) or short edge (notepad/calendar flip). |
+| **`--collate`<br>`--no-collate`** | `Optional[bool]` | `None` *(driver default: collates)* | `--collate`<br>`--no-collate` | `-o collate=true`<br>`-o collate=false` | Collation mode when printing multiple copies. Collated prints sets in order (`1,2,3; 1,2,3`); uncollated prints grouped pages (`1,1; 2,2; 3,3`). |
+| **`--color`** | `Optional[ColorMode]` | `None` *(printer default)* | `monochrome`<br>`color`<br>`auto` | `-o print-color-mode=monochrome`<br>`-o print-color-mode=color` | Color mode. `monochrome` forces grayscale printing on color-capable printers to conserve color toner. |
+| **`-m, --media`<br>`--page-size`** | `Optional[str]` | `None` *(printer PPD default: Letter or A4)* | Any paper size supported by your printer: `A4`, `Letter`, `Legal`, `Executive`, `A3`, `A5`, `Custom.WIDTHxHEIGHT`, etc. | `-o media=<size>` | Physical paper sheet size. Run `printer-craft options` to inspect the exact paper sizes supported by your printer hardware. |
+| **`-p, --pages`<br>`--page-ranges`** | `Optional[str]` | `None` *(all pages: `1-end`)* | Range strings: `'1-5'`, `'2,4,7'`, `'3-'`, `'1-3,5'`, or repeated sequences: `'1,1,1,1'` | `-o page-ranges=<range>` | Specific page numbers or ranges to print. Non-monotonic or repeated page sequences (e.g. `'1,1,1,1'`) are automatically pre-replicated via macOS `PDFKit` (JXA) to prevent CUPS `Bad page-ranges values` errors. |
+| **`--orientation`** | `Optional[Orientation]` | `None` *(Portrait / Auto)* | `portrait` (0°)<br>`landscape` (90° CCW)<br>`reverse-landscape` (90° CW)<br>`reverse-portrait` (180°) | `-o orientation-requested=3`<br>`-o orientation-requested=4`<br>`-o orientation-requested=5`<br>`-o orientation-requested=6` | Page orientation and rotation on the physical sheet. |
+| **`--scaling`** | `Optional[PrintScaling]` | `None` | `auto`<br>`auto-fit`<br>`fit-to-page`<br>`fill`<br>`none` | `-o print-scaling=<mode>` | CUPS IPP print scaling policy. *(Note: On macOS, `--fit-to-page` is the primary flag processed by Apple's `cgpdftoraster` filter).* |
+| **`-N, --number-up`** | `Optional[int]` | `None` *(1 page per sheet)* | `1`, `2`, `4`, `6`, `9`, `16` | `-o number-up=<int>` | **N-Up printing.** Prints multiple logical pages arranged in a grid onto a single physical sheet. |
+| **`-R, --repeat`** | `Optional[int]` | `None` *(1 copy)* | Any positive integer (e.g. `2`, `4`, `8`) | Pre-spool PDF synthesis | Repeats the document/pages N times by synthesizing a multi-page PDF before spooling. Useful with `-N` (e.g. `--repeat 4 -N 4` to print 4 copies of an ID badge or card on a single page). |
+| **`-o, --option`** | `Dict[str, str]` | `[]` *(empty)* | `KEY=VALUE` (repeatable, e.g. `-o InputSlot=Manual -o Resolution=600dpi`) | `-o <KEY>=<VALUE>` | Direct PPD hardware driver overrides. Run `printer-craft options` to discover valid keys for your printer (e.g. `InputSlot`, `MediaType`, `Resolution`, `EconoMode`, `pjlDensity`). |
+| **`--force-pdf`** | `bool` | `False` | Flag: present (`True`) or absent (`False`) | *(Local pre-conversion)* | Forces pre-conversion of non-PDF documents or images into an intermediate PDF before spooling. |
+| **`--dry-run`** | `bool` | `False` | Flag: present (`True`) or absent (`False`) | *(None — preview only)* | Safe preview mode. Generates and displays the exact `/usr/bin/lp` command line without submitting the job to physical printer hardware. |
+
+---
+
+### 2. Additional Subcommands Reference
+
+#### `printer-craft list`
+| Flag | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| **Printer** | `-d, --printer <name>` | `options.printer = str` | `-d <name>` |
-| **Copies** | `-n, --copies <int>` | `options.copies = int` | `-n <int>` |
-| **Title** | `-t, --title <str>` | `options.title = str` | `-t "<title>"` |
-| **Duplex** | `--duplex <mode>` | `DuplexMode.ONE_SIDED`<br>`DuplexMode.TWO_SIDED_LONG_EDGE`<br>`DuplexMode.TWO_SIDED_SHORT_EDGE` | `-o sides=one-sided`<br>`-o sides=two-sided-long-edge`<br>`-o sides=two-sided-short-edge` |
-| **Collation** | `--collate` / `--no-collate` | `options.collate = bool` | `-o collate=true / false` |
-| **Color Mode** | `--color <mode>` | `ColorMode.MONOCHROME`<br>`ColorMode.COLOR` | `-o print-color-mode=monochrome`<br>`-o print-color-mode=color` |
-| **Paper Size** | `-m, --media <size>` | `options.media = str` | `-o media=<size>` |
-| **Page Range** | `-p, --pages <range>` | `options.page_ranges = str` | `-o page-ranges=<range>` *(or PDFKit duplicated if repeating)* |
-| **Repeat / Imposition** | `-R, --repeat <int>` | `options.repeat = int` | *(Duplicated via PDFKit before spooling)* |
-| **Orientation** | `--orientation <orient>` | `Orientation.PORTRAIT`<br>`Orientation.LANDSCAPE`<br>`Orientation.REVERSE_LANDSCAPE`<br>`Orientation.REVERSE_PORTRAIT` | `-o orientation-requested=3`<br>`-o orientation-requested=4`<br>`-o orientation-requested=5`<br>`-o orientation-requested=6` |
-| **Fit to Page** | `--fit-to-page`, `--fit-to-pages` | `options.fit_to_page = bool` | `-o fit-to-page=true / false` |
-| **Scaling** | `--scaling <mode>` | `PrintScaling.AUTO_FIT`<br>`PrintScaling.FIT_TO_PAGE`<br>`PrintScaling.FILL` | `-o print-scaling=<mode>` |
-| **N-Up (Pages/Sheet)** | `-N, --number-up <int>` | `options.number_up = 1,2,4,6,9,16` | `-o number-up=<int>` |
-| **Custom PPD Options** | `-o <key>=<value>` | `options.raw_options = dict` | `-o <key>=<value>` |
-| **Dry Run** | `--dry-run` | `options.dry_run = bool` | *(Prints command without executing)* |
+| **`--json`** | Flag | `False` | Outputs discovered local and network printers with their statuses (`idle`, `printing`, `disabled`) and default status in JSON format. |
+
+#### `printer-craft options [printer]`
+| Parameter / Flag | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| **`printer`** | `str` (optional) | `None` *(system default)* | Name of the printer whose hardware options should be queried. |
+| **`--json`** | Flag | `False` | Outputs all parsed PPD hardware options, current defaults (marked with `*`), and available choices in JSON format. |
+
+#### `printer-craft jobs [printer]`
+| Parameter / Flag | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| **`printer`** | `str` (optional) | `None` *(all printers)* | Filter the active print job queue to show only jobs for the specified printer. |
+
+#### `printer-craft cancel <job_id>`
+| Parameter / Flag | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| **`job_id`** | `str` (positional) | *(Required)* | CUPS Job ID to cancel (e.g. `HP_LaserJet_Professional_M1136_MFP-104`), or printer name when `-a` is set. |
+| **`-a, --all`** | Flag | `False` | Purges and cancels all pending print jobs in the queue for the specified printer. |
 
 ---
 

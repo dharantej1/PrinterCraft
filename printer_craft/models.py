@@ -138,7 +138,7 @@ class PrintJobOptions:
     media: Optional[str] = None
     page_ranges: Optional[str] = None
     orientation: Optional[Orientation] = None
-    fit_to_page: Optional[bool] = None
+    fit_to_page: Optional[bool] = True
     scaling: Optional[PrintScaling] = None
     number_up: Optional[int] = None
     repeat: Optional[int] = None
