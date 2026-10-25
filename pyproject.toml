@@ -50,6 +50,6 @@ printer-craft = "printer_craft.cli:main"
 printcraft = "printer_craft.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/example/printer-craft"
-Repository = "https://github.com/example/printer-craft"
-Issues = "https://github.com/example/printer-craft/issues"
+Homepage = "https://github.com/dharantej1/PrinterCraft"
+Repository = "https://github.com/dharantej1/PrinterCraft"
+Issues = "https://github.com/dharantej1/PrinterCraft/issues"

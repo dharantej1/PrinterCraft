@@ -50,8 +50,8 @@ Full disassembly and instruction analysis is documented in [REVERSE_ENGINEERING.
 
 ### From Source
 ```bash
-git clone https://github.com/example/printer-craft.git
-cd printer-craft
+git clone https://github.com/dharantej1/PrinterCraft.git
+cd PrinterCraft
 pip install .
 ```
 
