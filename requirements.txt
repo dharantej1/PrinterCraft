@@ -13,6 +13,7 @@ Pillow>=10.2.0
 
 # Windows print spooler backend (installed only on Windows):
 pywin32>=306; sys_platform == "win32"
+pypdfium2>=4.25.0; sys_platform == "win32"
 
 # Development & Testing:
 pytest>=7.4.0

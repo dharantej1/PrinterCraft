@@ -46,6 +46,7 @@ def make_win32print():
         win32_backend.DC_DUPLEX: 1,
         win32_backend.DC_COLORDEVICE: 1,
         win32_backend.DC_COLLATE: 1,
+        win32_backend.DC_COPIES: 999,
     }
     api.DeviceCapabilities.side_effect = lambda name, port, cap, dm=None: caps.get(cap)
     api.StartDocPrinter.return_value = 42
@@ -119,7 +120,67 @@ class TestWin32Discovery(Win32TestCase):
         self.assertEqual(self.backend.get_printer_options("Nope"), {})
 
 
-class TestWin32Submission(Win32TestCase):
+def _have(module):
+    try:
+        __import__(module)
+        return True
+    except ImportError:
+        return False
+
+
+HAVE_RENDER_DEPS = _have("pypdfium2") and _have("PIL") and _have("pypdf")
+
+
+def make_pdf(path, pages=1, size=(612, 792)):
+    import pypdf
+
+    writer = pypdf.PdfWriter()
+    for _ in range(pages):
+        writer.add_blank_page(width=size[0], height=size[1])
+    with open(path, "wb") as f:
+        writer.write(f)
+    return path
+
+
+DEVICE_CAPS = {
+    win32_backend.HORZRES: 850,
+    win32_backend.VERTRES: 1100,
+    win32_backend.LOGPIXELSX: 100,
+    win32_backend.LOGPIXELSY: 100,
+    win32_backend.PHYSICALWIDTH: 850,
+    win32_backend.PHYSICALHEIGHT: 1100,
+    win32_backend.PHYSICALOFFSETX: 0,
+    win32_backend.PHYSICALOFFSETY: 0,
+}
+
+
+class GdiTestCase(Win32TestCase):
+    def setUp(self):
+        super().setUp()
+        self.api.GetDeviceCaps.side_effect = lambda hdc, index: DEVICE_CAPS[index]
+        self.api.StartDoc.return_value = 77
+        self.gdi = MagicMock(name="win32gui")
+        self.gdi.CreateDC.return_value = 1234
+        patcher = patch.object(win32_backend, "win32gui", self.gdi)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.drawn = []
+        draw_patch = patch.object(
+            Win32Backend, "_draw", staticmethod(lambda hdc, image, rect: self.drawn.append((image, rect)))
+        )
+        draw_patch.start()
+        self.addCleanup(draw_patch.stop)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def pdf(self, pages=1, size=(612, 792)):
+        return make_pdf(Path(self.tmp.name) / "doc.pdf", pages, size)
+
+    def devmode(self):
+        return self.gdi.CreateDC.call_args[0][2]
+
+
+class TestWin32RawSubmission(Win32TestCase):
     def test_submit_bytes_raw(self):
         opts = PrintJobOptions(
             printer="HP LaserJet",
@@ -130,16 +191,16 @@ class TestWin32Submission(Win32TestCase):
             orientation=Orientation.LANDSCAPE,
             media="A4",
             collate=False,
-            raw_options={"InputSlot": "Manual"},
+            raw_options={"InputSlot": "Tray 1"},
         )
-        result = self.backend.submit_bytes(b"%PDF-1.4 data", opts)
+        result = self.backend.submit_bytes(b"%!PS-Adobe-3.0 data", opts)
 
         self.assertTrue(result.success)
         self.assertEqual(result.printer, "HP LaserJet")
         self.assertEqual(result.job_id, "HP LaserJet-42")
         self.assertIn("request id is HP LaserJet-42", result.output)
         self.api.StartDocPrinter.assert_called_once_with(HANDLE, 1, ("Stream", None, "RAW"))
-        self.api.WritePrinter.assert_called_once_with(HANDLE, b"%PDF-1.4 data")
+        self.api.WritePrinter.assert_called_once_with(HANDLE, b"%!PS-Adobe-3.0 data")
         self.api.EndDocPrinter.assert_called_once_with(HANDLE)
 
         defaults = self.api.OpenPrinter.call_args_list[-1][0][1]
@@ -151,51 +212,56 @@ class TestWin32Submission(Win32TestCase):
         self.assertEqual(dm.Orientation, 2)
         self.assertEqual(dm.PaperSize, 9)
         self.assertEqual(dm.Collate, 0)
-        for attr in ("Copies", "Duplex", "Color", "Orientation", "PaperSize", "Collate"):
+        self.assertEqual(dm.DefaultSource, 7)
+        for attr in ("Copies", "Duplex", "Color", "Orientation", "PaperSize", "Collate", "DefaultSource"):
             self.assertTrue(dm.Fields & win32_backend.DEVMODE_FIELD_FLAGS[attr], attr)
         self.api.DocumentProperties.assert_called_once()
-        self.assertFalse(any("InputSlot" in part for part in result.command_run))
+        self.assertIn("datatype=RAW", result.command_run)
+        self.assertIn("InputSlot=Tray 1", result.command_run)
 
     def test_submit_file_raw_in_chunks(self):
         with tempfile.TemporaryDirectory() as tmp:
-            doc = Path(tmp) / "doc.pdf"
-            payload = b"%PDF-1.4 " + b"x" * (200 * 1024)
+            doc = Path(tmp) / "doc.ps"
+            payload = b"%!PS " + b"x" * (200 * 1024)
             doc.write_bytes(payload)
-            opts = PrintJobOptions(printer="HP LaserJet", title="doc.pdf")
-            result = self.backend.submit_file(doc, opts)
+            result = self.backend.submit_file(doc, PrintJobOptions(printer="HP LaserJet", title="doc.ps"))
 
         self.assertTrue(result.success)
         written = b"".join(c[0][1] for c in self.api.WritePrinter.call_args_list)
         self.assertEqual(written, payload)
         self.assertGreater(self.api.WritePrinter.call_count, 1)
-        self.assertEqual(result.command_run[-1], str(doc))
+        self.assertEqual(result.command_run[-1], str(doc.resolve()))
+
+    def test_raw_option_sends_pdf_unchanged(self):
+        result = self.backend.submit_bytes(
+            b"%PDF-1.4 data", PrintJobOptions(printer="HP LaserJet", title="t", raw_options={"raw": "true"})
+        )
+        self.assertTrue(result.success)
+        self.api.WritePrinter.assert_called_once_with(HANDLE, b"%PDF-1.4 data")
+        self.api.StartDoc.assert_not_called()
 
     def test_submit_failure_returns_unsuccessful_result(self):
         self.api.StartDocPrinter.side_effect = Exception("Access is denied.")
-        result = self.backend.submit_bytes(b"data", PrintJobOptions(printer="HP LaserJet", title="t"))
+        result = self.backend.submit_bytes(b"PCL data", PrintJobOptions(printer="HP LaserJet", title="t"))
         self.assertFalse(result.success)
         self.assertIn("Access is denied", result.error)
         self.api.ClosePrinter.assert_called_with(HANDLE)
 
-    def test_dry_run_does_not_spool(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            doc = Path(tmp) / "doc.pdf"
-            doc.write_bytes(b"%PDF-1.4")
-            opts = PrintJobOptions(printer="HP LaserJet", title="doc.pdf", copies=2, dry_run=True)
-            result = self.backend.submit_file(doc, opts)
-        self.assertTrue(result.dry_run)
-        self.assertEqual(result.job_id, "DRY-RUN-0")
-        self.assertIn("Copies=2", result.command_run)
-        self.api.StartDocPrinter.assert_not_called()
+    def test_resolution_and_media_type_options(self):
+        result = self.backend.submit_bytes(
+            b"PCL", PrintJobOptions(printer="HP LaserJet", raw_options={"Resolution": "600x300dpi", "Scale": "90"})
+        )
+        dm = self.api.OpenPrinter.call_args_list[-1][0][1]["pDevMode"]
+        self.assertEqual((dm.PrintQuality, dm.YResolution, dm.Scale), (600, 300, 90))
+        self.assertTrue(result.success)
 
-    def test_page_sequence(self):
-        seq = Win32Backend._page_sequence
-        self.assertEqual(seq(PrintJobOptions(page_ranges="1-3,5")), [1, 2, 3, 5])
-        self.assertEqual(seq(PrintJobOptions(page_ranges="2,2,1")), [2, 2, 1])
-        self.assertEqual(seq(PrintJobOptions(repeat=3)), [1, 1, 1])
-        self.assertIsNone(seq(PrintJobOptions()))
-        with self.assertRaises(DocumentConversionError):
-            seq(PrintJobOptions(page_ranges="3-"))
+    def test_unknown_option_is_ignored_with_warning(self):
+        with self.assertLogs("printer_craft.backends.win32_backend", level="WARNING") as logs:
+            result = self.backend.submit_bytes(
+                b"PCL", PrintJobOptions(printer="HP LaserJet", raw_options={"pjlDensity": "3"})
+            )
+        self.assertTrue(result.success)
+        self.assertIn("pjlDensity", logs.output[0])
 
     def test_manager_dispatches_to_win32(self):
         with patch("printer_craft.core.sys.platform", "win32"):
@@ -204,6 +270,155 @@ class TestWin32Submission(Win32TestCase):
         self.assertTrue(result.success)
         self.assertEqual(result.printer, "HP LaserJet")
         self.assertEqual([p.name for p in mgr.list_printers()], ["HP LaserJet", "Microsoft Print to PDF"])
+
+
+@unittest.skipUnless(HAVE_RENDER_DEPS, "pypdfium2, Pillow and pypdf are required")
+class TestWin32GdiSubmission(GdiTestCase):
+    def test_pdf_rendered_through_gdi(self):
+        doc = self.pdf(pages=3)
+        opts = PrintJobOptions(printer="HP LaserJet", title="doc.pdf", copies=2, duplex=DuplexMode.TWO_SIDED_LONG_EDGE)
+        result = self.backend.submit_file(doc, opts)
+
+        self.assertTrue(result.success, result.error)
+        self.assertEqual(result.job_id, "HP LaserJet-77")
+        self.assertEqual(result.output, "request id is HP LaserJet-77 (1 file(s))")
+        self.assertEqual(
+            result.command_run[:7], ["win32print", "-d", "HP LaserJet", "-t", "doc.pdf", "-o", "render=gdi"]
+        )
+        self.gdi.CreateDC.assert_called_once()
+        self.assertEqual(self.gdi.CreateDC.call_args[0][:2], ("WINSPOOL", "HP LaserJet"))
+        self.assertEqual((self.devmode().Copies, self.devmode().Duplex), (2, 2))
+        self.api.StartDoc.assert_called_once_with(1234, ("doc.pdf", None, None, 0))
+        self.assertEqual(self.api.StartPage.call_count, 3)
+        self.api.EndDoc.assert_called_once_with(1234)
+        self.gdi.DeleteDC.assert_called_once_with(1234)
+        self.assertEqual([rect for _, rect in self.drawn], [(0, 0, 850, 1100)] * 3)
+        self.api.StartDocPrinter.assert_not_called()
+
+    def test_repeat_with_number_up(self):
+        result = self.backend.submit_file(self.pdf(), PrintJobOptions(printer="HP LaserJet", repeat=4, number_up=2))
+        self.assertTrue(result.success)
+        self.assertEqual(self.api.StartPage.call_count, 2)
+        self.assertEqual(len(self.drawn), 4)
+        rects = [rect for _, rect in self.drawn[:2]]
+        self.assertLess(rects[0][3], rects[1][1] + 1)  # stacked top/bottom
+        image = self.drawn[0][0]
+        self.assertGreater(image.width, image.height)  # portrait page rotated into landscape cell
+        self.assertIn("number-up=2", result.command_run)
+
+    def test_page_ranges(self):
+        doc = self.pdf(pages=5)
+        for ranges, sheets in (("2-", 4), ("-2", 2), ("1,1,1", 3), ("3,1", 2), ("2-3,5", 3)):
+            self.api.StartPage.reset_mock()
+            result = self.backend.submit_file(doc, PrintJobOptions(printer="HP LaserJet", page_ranges=ranges))
+            self.assertTrue(result.success)
+            self.assertEqual(self.api.StartPage.call_count, sheets, ranges)
+
+    def test_copies_emulated_when_driver_cannot_copy(self):
+        caps = {win32_backend.DC_COPIES: 1}
+        self.api.DeviceCapabilities.side_effect = lambda name, port, cap, dm=None: caps.get(cap)
+        result = self.backend.submit_file(
+            self.pdf(pages=3), PrintJobOptions(printer="HP LaserJet", copies=2, duplex=DuplexMode.TWO_SIDED_LONG_EDGE)
+        )
+        self.assertTrue(result.success)
+        self.assertEqual(self.devmode().Copies, 1)
+        self.assertEqual(self.api.StartPage.call_count, 8)  # 3 pages + blank back side, twice
+        self.assertIn("copies-emulated=2", result.command_run)
+
+    def test_uncollated_emulated_copies(self):
+        self.api.DeviceCapabilities.side_effect = lambda name, port, cap, dm=None: None
+        self.backend.submit_file(self.pdf(pages=2), PrintJobOptions(printer="HP LaserJet", copies=3, collate=False))
+        self.assertEqual(self.api.StartPage.call_count, 6)
+
+    def test_monochrome_renders_grayscale(self):
+        self.backend.submit_file(self.pdf(), PrintJobOptions(printer="HP LaserJet", color_mode=ColorMode.MONOCHROME))
+        self.assertEqual(self.drawn[0][0].mode, "L")
+        self.assertEqual(self.devmode().Color, 1)
+
+    def test_no_fit_to_page_prints_actual_size_centered(self):
+        doc = self.pdf(size=(297, 420))  # A6
+        self.backend.submit_file(doc, PrintJobOptions(printer="HP LaserJet", fit_to_page=False))
+        left, top, right, bottom = self.drawn[0][1]
+        self.assertEqual((right - left, bottom - top), (412, 583))
+        self.assertEqual((left, top), ((850 - 412) // 2, (1100 - 583) // 2))
+
+    def test_fit_to_page_scales_small_page_up(self):
+        self.backend.submit_file(self.pdf(size=(297, 420)), PrintJobOptions(printer="HP LaserJet"))
+        left, top, right, bottom = self.drawn[0][1]
+        self.assertEqual(right - left, 778)
+        self.assertEqual(bottom - top, 1100)
+
+    def test_reverse_landscape_rotates_180(self):
+        self.backend.submit_file(
+            self.pdf(), PrintJobOptions(printer="HP LaserJet", orientation=Orientation.REVERSE_LANDSCAPE)
+        )
+        self.assertEqual(self.devmode().Orientation, 2)
+
+    def test_cups_style_raw_options_apply(self):
+        self.backend.submit_file(
+            self.pdf(pages=4),
+            PrintJobOptions(printer="HP LaserJet", raw_options={"number-up": "4", "sides": "two-sided-short-edge"}),
+        )
+        self.assertEqual(self.api.StartPage.call_count, 1)
+        self.assertEqual(len(self.drawn), 4)
+        self.assertEqual(self.devmode().Duplex, 3)
+
+    def test_image_and_text_documents(self):
+        from PIL import Image
+
+        img = Path(self.tmp.name) / "pic.png"
+        Image.new("RGBA", (400, 200), (255, 0, 0, 128)).save(img)
+        self.assertTrue(self.backend.submit_file(img, PrintJobOptions(printer="HP LaserJet")).success)
+        self.assertEqual(self.api.StartPage.call_count, 1)
+
+        txt = Path(self.tmp.name) / "notes.txt"
+        txt.write_text("\n".join(f"line {i}" for i in range(150)))
+        self.assertTrue(self.backend.submit_file(txt, PrintJobOptions(printer="HP LaserJet")).success)
+        self.assertEqual(self.api.StartPage.call_count, 1 + 3)
+
+    def test_pdf_bytes_rendered(self):
+        data = self.pdf(pages=2).read_bytes()
+        result = self.backend.submit_bytes(data, PrintJobOptions(printer="HP LaserJet", title="Bytes"))
+        self.assertTrue(result.success)
+        self.assertEqual(self.api.StartPage.call_count, 2)
+        self.api.WritePrinter.assert_not_called()
+
+    def test_draw_failure_aborts_job(self):
+        with patch.object(Win32Backend, "_draw", staticmethod(MagicMock(side_effect=OSError("device lost")))):
+            result = self.backend.submit_file(self.pdf(), PrintJobOptions(printer="HP LaserJet"))
+        self.assertFalse(result.success)
+        self.assertIn("device lost", result.error)
+        self.api.AbortDoc.assert_called_once_with(1234)
+        self.gdi.DeleteDC.assert_called_once_with(1234)
+
+    def test_dry_run_does_not_spool(self):
+        result = self.backend.submit_file(
+            self.pdf(), PrintJobOptions(printer="HP LaserJet", title="doc.pdf", copies=2, dry_run=True)
+        )
+        self.assertTrue(result.dry_run)
+        self.assertEqual(result.job_id, "DRY-RUN-0")
+        self.assertIn("Copies=2", result.command_run)
+        self.assertIn("scaling=fit", result.command_run)
+        self.gdi.CreateDC.assert_not_called()
+        self.api.StartDoc.assert_not_called()
+
+    def test_empty_page_selection_raises(self):
+        with self.assertRaises(DocumentConversionError):
+            self.backend.submit_file(self.pdf(), PrintJobOptions(printer="HP LaserJet", page_ranges="7-9"))
+
+    def test_printer_options_include_media_type_and_resolution(self):
+        caps = {
+            win32_backend.DC_MEDIATYPENAMES: ["Plain", "Glossy"],
+            win32_backend.DC_MEDIATYPES: [1, 257],
+            win32_backend.DC_ENUMRESOLUTIONS: [(600, 600), (1200, 600)],
+        }
+        self.api.DeviceCapabilities.side_effect = lambda name, port, cap, dm=None: caps.get(cap)
+        options = self.backend.get_printer_options("HP LaserJet")
+        self.assertEqual([c.name for c in options["MediaType"].choices], ["Plain", "Glossy"])
+        self.assertEqual([c.name for c in options["Resolution"].choices], ["600dpi", "1200x600dpi"])
+        opts = PrintJobOptions(printer="HP LaserJet", raw_options={"MediaType": "Glossy"})
+        self.backend.submit_file(self.pdf(), opts)
+        self.assertEqual(self.devmode().MediaType, 257)
 
 
 class TestWin32Queue(Win32TestCase):

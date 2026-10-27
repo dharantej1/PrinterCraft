@@ -1,31 +1,61 @@
 """
-Windows print spooler backend built on pywin32's `win32print`.
+Windows print spooler backend built on pywin32 (`win32print` / `win32gui`).
 
-Documents are spooled with the RAW datatype, so the target printer must understand
-the submitted format (e.g. PDF-direct or PostScript printers). Non-native formats are
-converted to PDF first via `DocumentConverter`.
+Documents (PDF, images, text, Office files) are rendered through GDI onto a printer
+device context, so any installed Windows printer driver works and layout options
+(fit-to-page, scaling, number-up, page ranges, orientation) are applied locally.
+Printer-language files (.ps, .pcl, .prn, ...) or jobs with `-o raw` are spooled
+unchanged with the RAW datatype.
 """
 
 from __future__ import annotations
 
+import dataclasses
+import logging
+import re
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Union
 
 try:
     import win32print  # type: ignore[import-not-found]
 except ImportError:  # pragma: no cover - exercised implicitly on non-Windows platforms
     win32print = None
 
+try:
+    import win32gui  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover - exercised implicitly on non-Windows platforms
+    win32gui = None
+
 from ..converter import DocumentConverter
 from ..exceptions import DocumentConversionError, SpoolerUnavailableError
 from ..models import (
+    ColorMode,
+    DuplexMode,
+    Orientation,
     PrintJobOptions,
+    PrintScaling,
     PrintResult,
     Printer,
     PrinterOption,
     PrinterOptionChoice,
 )
 from .base import PrinterBackend
+from .win32_render import (
+    LETTER_PT,
+    DeviceGeometry,
+    layout_sheet,
+    open_bytes,
+    open_document,
+    plan_sheets,
+    render_placement,
+    resolve_number_up,
+    resolve_scaling,
+    select_pages,
+    sniff_bytes,
+)
+
+logger = logging.getLogger(__name__)
 
 # winspool.h / wingdi.h constants (fixed Win32 ABI values)
 PRINTER_ENUM_LOCAL = 0x00000002
@@ -39,9 +69,23 @@ DM_IN_BUFFER = 8
 DC_BINS = 6
 DC_DUPLEX = 7
 DC_BINNAMES = 12
+DC_ENUMRESOLUTIONS = 13
 DC_PAPERNAMES = 16
+DC_COPIES = 18
 DC_COLLATE = 22
 DC_COLORDEVICE = 32
+DC_MEDIATYPENAMES = 34
+DC_MEDIATYPES = 35
+
+# GetDeviceCaps indices
+HORZRES = 8
+VERTRES = 10
+LOGPIXELSX = 88
+LOGPIXELSY = 90
+PHYSICALWIDTH = 110
+PHYSICALHEIGHT = 111
+PHYSICALOFFSETX = 112
+PHYSICALOFFSETY = 113
 
 DEVMODE_FIELD_FLAGS = {
     "Orientation": 0x00000001,  # DM_ORIENTATION
@@ -51,6 +95,30 @@ DEVMODE_FIELD_FLAGS = {
     "Duplex": 0x00001000,  # DM_DUPLEX
     "Collate": 0x00008000,  # DM_COLLATE
     "FormName": 0x00010000,  # DM_FORMNAME
+    "PaperLength": 0x00000004,  # DM_PAPERLENGTH
+    "PaperWidth": 0x00000008,  # DM_PAPERWIDTH
+    "Scale": 0x00000010,  # DM_SCALE
+    "Nup": 0x00000040,  # DM_NUP
+    "DefaultSource": 0x00000200,  # DM_DEFAULTSOURCE
+    "PrintQuality": 0x00000400,  # DM_PRINTQUALITY
+    "YResolution": 0x00002000,  # DM_YRESOLUTION
+    "TTOption": 0x00004000,  # DM_TTOPTION
+    "ICMMethod": 0x00800000,  # DM_ICMMETHOD
+    "ICMIntent": 0x01000000,  # DM_ICMINTENT
+    "MediaType": 0x02000000,  # DM_MEDIATYPE
+    "DitherType": 0x04000000,  # DM_DITHERTYPE
+}
+
+# `-o KEY=VALUE` driver keys accepted on Windows (lower-cased) -> canonical name.
+# PPD-style names are resolved through DeviceCapabilities; the rest are DEVMODE fields.
+DRIVER_OPTION_KEYS = {
+    "inputslot": "InputSlot",
+    "mediatype": "MediaType",
+    "resolution": "Resolution",
+    **{name.lower(): name for name in (
+        "DefaultSource", "PrintQuality", "YResolution", "DitherType", "ICMMethod",
+        "ICMIntent", "Scale", "PaperWidth", "PaperLength", "PaperSize", "Nup", "TTOption",
+    )},
 }
 
 _STATUS_TEXT = [
@@ -65,8 +133,11 @@ _STATUS_TEXT = [
     (0x00000200, "is busy."),  # PRINTER_STATUS_BUSY
 ]
 
-# Formats spooled as-is with the RAW datatype; everything else is converted to PDF.
-RAW_PASSTHROUGH_EXTENSIONS = {".pdf", ".ps", ".eps", ".prn", ".pcl", ".pxl", ".txt", ".text", ".log"}
+# Printer-language files always spooled unchanged with the RAW datatype.
+RAW_EXTENSIONS = {".ps", ".eps", ".prn", ".pcl", ".pxl", ".raw"}
+
+# With `-o raw`, these are sent as-is; anything else is converted to PDF first.
+RAW_PASSTHROUGH_EXTENSIONS = RAW_EXTENSIONS | {".pdf", ".txt", ".text", ".log"}
 
 _WRITE_CHUNK = 64 * 1024
 
@@ -80,6 +151,29 @@ def _status_text(status: int) -> str:
 
 def _clean(value: Any) -> str:
     return str(value).split("\x00", 1)[0].strip()
+
+
+def _truthy(value: str) -> bool:
+    return value.strip().lower() not in ("false", "0", "no", "off")
+
+
+def _lookup_id(value: str, names: List[Any], ids: List[Any]) -> int:
+    """Resolve a driver choice name (e.g. a tray name) to its numeric id."""
+    wanted = value.strip().lower()
+    for name, ident in zip(names, ids):
+        if _clean(name).lower() == wanted:
+            return int(ident)
+    if wanted.lstrip("-").isdigit():
+        return int(wanted)
+    raise ValueError(value)
+
+
+def _parse_resolution(value: str) -> Tuple[int, int]:
+    match = re.fullmatch(r"\s*(\d+)\s*(?:x\s*(\d+))?\s*(?:dpi)?\s*", value, re.IGNORECASE)
+    if not match:
+        raise ValueError(value)
+    x = int(match.group(1))
+    return x, int(match.group(2) or x)
 
 
 def _format_time(value: Any) -> str:
@@ -233,6 +327,33 @@ class Win32Backend(PrinterBackend):
             default = {0: "False", 1: "True"}.get(getattr(devmode, "Collate", None))
             options["Collate"] = self._make_option("Collate", "Collate", ["True", "False"], default)
 
+        media_names = self._capability(printer_name, port, DC_MEDIATYPENAMES)
+        if media_names:
+            names = [n for n in (_clean(m) for m in media_names) if n]
+            media_ids = self._capability(printer_name, port, DC_MEDIATYPES) or []
+            default_media = getattr(devmode, "MediaType", None)
+            default = None
+            for media_id, media_name in zip(media_ids, names):
+                if media_id == default_media:
+                    default = media_name
+            options["MediaType"] = self._make_option("MediaType", "Media Type", names, default)
+
+        resolutions = self._capability(printer_name, port, DC_ENUMRESOLUTIONS)
+        if resolutions:
+            names = []
+            for res in resolutions:
+                x, y = int(res[0]), int(res[1])
+                name = f"{x}dpi" if x == y else f"{x}x{y}dpi"
+                if x > 0 and name not in names:
+                    names.append(name)
+            dx = getattr(devmode, "PrintQuality", None)
+            dy = getattr(devmode, "YResolution", None) or dx
+            default = None
+            if isinstance(dx, int) and dx > 0:
+                default = f"{dx}dpi" if dx == dy else f"{dx}x{dy}dpi"
+            if names:
+                options["Resolution"] = self._make_option("Resolution", "Resolution", names, default)
+
         default = {1: "Portrait", 2: "Landscape"}.get(getattr(devmode, "Orientation", None))
         options["Orientation"] = self._make_option(
             "Orientation", "Orientation", ["Portrait", "Landscape"], default
@@ -243,6 +364,14 @@ class Win32Backend(PrinterBackend):
     # =========================================================================
     # JOB SUBMISSION
     # =========================================================================
+
+    def _gdi(self) -> Any:
+        if win32gui is None:
+            raise SpoolerUnavailableError(
+                "pywin32 is required for printing on Windows. "
+                "Install it with: pip install \"printer-craft[windows]\""
+            )
+        return win32gui
 
     def _build_devmode(self, printer_name: str, settings: Dict[str, Any]) -> Any:
         """Apply settings to the printer's default DEVMODE and let the driver validate them."""
@@ -263,20 +392,174 @@ class Win32Backend(PrinterBackend):
             api.ClosePrinter(handle)
 
     @staticmethod
-    def _describe(printer: str, title: str, settings: Dict[str, Any], source: Optional[str]) -> List[str]:
-        cmd = ["win32print", "-d", printer, "-t", title, "-o", "datatype=RAW"]
+    def _effective_options(opts: PrintJobOptions) -> Tuple[PrintJobOptions, Dict[str, str], bool]:
+        """
+        Split `raw_options` into: standard CUPS/IPP keys applied to a copy of the job
+        options (so `-o sides=...`, `-o number-up=4`, ... behave as on CUPS), driver keys
+        resolved against the DEVMODE (`InputSlot`, `MediaType`, `Resolution`, DEVMODE field
+        names), and the `raw` flag. Unknown keys are logged and ignored.
+        """
+        eff = dataclasses.replace(opts, raw_options={})
+        driver: Dict[str, str] = {}
+        raw_mode = False
+        for key, value in opts.raw_options.items():
+            k = key.strip().lower()
+            v = str(value).strip()
+            try:
+                if k == "raw":
+                    raw_mode = _truthy(v)
+                elif k in ("sides", "duplex"):
+                    eff.duplex = DuplexMode.from_str(v)
+                elif k in ("print-color-mode", "colormodel"):
+                    eff.color_mode = ColorMode.from_str(v)
+                elif k in ("media", "pagesize", "pageregion"):
+                    eff.media = v
+                elif k == "collate":
+                    eff.collate = _truthy(v)
+                elif k in ("orientation-requested", "orientation"):
+                    eff.orientation = Orientation.from_str(v)
+                elif k == "landscape":
+                    if _truthy(v):
+                        eff.orientation = Orientation.LANDSCAPE
+                elif k in ("fit-to-page", "fitplot"):
+                    eff.fit_to_page = _truthy(v)
+                elif k == "print-scaling":
+                    eff.scaling = PrintScaling(v.lower())
+                elif k == "number-up":
+                    eff.number_up = int(v)
+                elif k == "page-ranges":
+                    eff.page_ranges = v
+                elif k == "copies":
+                    eff.copies = int(v)
+                elif k in DRIVER_OPTION_KEYS:
+                    driver[DRIVER_OPTION_KEYS[k]] = v
+                else:
+                    logger.warning("Ignoring option %s=%s: not supported by the Windows backend", key, value)
+            except (KeyError, ValueError):
+                logger.warning("Ignoring option %s=%s: invalid value", key, value)
+        return eff, driver, raw_mode
+
+    def _printer_port(self, printer_name: str) -> str:
+        return _clean(self._get_printer_info(printer_name).get("pPortName") or "")
+
+    def _driver_settings(self, printer_name: str, driver: Dict[str, str]) -> Dict[str, Any]:
+        """Resolve driver option names (tray / media type names, '600dpi', ...) to DEVMODE values."""
+        settings: Dict[str, Any] = {}
+        if not driver:
+            return settings
+        port = self._printer_port(printer_name)
+
+        def caps(capability: int) -> List[Any]:
+            return list(self._capability(printer_name, port, capability) or [])
+
+        for key, value in driver.items():
+            try:
+                if key == "InputSlot":
+                    settings["DefaultSource"] = _lookup_id(value, caps(DC_BINNAMES), caps(DC_BINS))
+                elif key == "MediaType":
+                    settings["MediaType"] = _lookup_id(value, caps(DC_MEDIATYPENAMES), caps(DC_MEDIATYPES))
+                elif key == "Resolution":
+                    settings["PrintQuality"], settings["YResolution"] = _parse_resolution(value)
+                else:
+                    settings[key] = int(value)
+            except ValueError:
+                logger.warning("Ignoring option %s=%s: not supported by printer '%s'", key, value, printer_name)
+        return settings
+
+    def _hardware_copies(self, printer_name: str) -> int:
+        """Maximum copies the driver can produce itself (DC_COPIES); 1 if unknown."""
+        try:
+            value = self._capability(printer_name, self._printer_port(printer_name), DC_COPIES)
+            return max(1, int(value)) if value else 1
+        except SpoolerUnavailableError:
+            raise
+        except Exception:
+            return 1
+
+    def _geometry(self, hdc: Any) -> DeviceGeometry:
+        api = self._api()
+
+        def cap(index: int) -> int:
+            return int(api.GetDeviceCaps(hdc, index) or 0)
+
+        printable_w, printable_h = cap(HORZRES), cap(VERTRES)
+        return DeviceGeometry(
+            dpi_x=cap(LOGPIXELSX) or 300,
+            dpi_y=cap(LOGPIXELSY) or 300,
+            printable_w=printable_w,
+            printable_h=printable_h,
+            physical_w=cap(PHYSICALWIDTH) or printable_w,
+            physical_h=cap(PHYSICALHEIGHT) or printable_h,
+            offset_x=cap(PHYSICALOFFSETX),
+            offset_y=cap(PHYSICALOFFSETY),
+        )
+
+    @staticmethod
+    def _draw(hdc: Any, image: Any, rect: Tuple[int, int, int, int]) -> None:
+        from PIL import ImageWin
+
+        ImageWin.Dib(image).draw(int(hdc), rect)
+
+    @staticmethod
+    def _describe(
+        printer: str,
+        title: str,
+        mode: str,
+        settings: Dict[str, Any],
+        extra: List[Tuple[str, Any]],
+        source: Optional[str],
+    ) -> List[str]:
+        cmd = ["win32print", "-d", printer, "-t", title, "-o", "datatype=RAW" if mode == "raw" else "render=gdi"]
         for key, value in settings.items():
+            cmd.extend(["-o", f"{key}={value}"])
+        for key, value in extra:
             cmd.extend(["-o", f"{key}={value}"])
         if source is not None:
             cmd.append(source)
         return cmd
 
-    def _spool(self, printer: str, title: str, opts: PrintJobOptions, payload: Union[bytes, Path]) -> PrintResult:
-        api = self._api()
-        settings = opts.build_devmode_settings()
-        source = str(payload) if isinstance(payload, Path) else None
-        cmd = self._describe(printer, title, settings, source)
+    @staticmethod
+    def _layout_args(opts: PrintJobOptions, driver: Dict[str, str], emulated_copies: int) -> List[Tuple[str, Any]]:
+        args: List[Tuple[str, Any]] = [("scaling", resolve_scaling(opts))]
+        number_up = resolve_number_up(opts)
+        if number_up > 1:
+            args.append(("number-up", number_up))
+        if opts.page_ranges:
+            args.append(("page-ranges", opts.page_ranges))
+        if opts.repeat and opts.repeat > 1:
+            args.append(("repeat", opts.repeat))
+        if emulated_copies > 1:
+            args.append(("copies-emulated", emulated_copies))
+        args.extend(driver.items())
+        return args
 
+    @staticmethod
+    def _success(printer: str, job_id: Any, cmd: List[str]) -> PrintResult:
+        request_id = f"{printer}-{job_id}"
+        return PrintResult(
+            success=True,
+            printer=printer,
+            job_id=request_id,
+            command_run=cmd,
+            output=f"request id is {request_id} (1 file(s))",
+        )
+
+    @staticmethod
+    def _dry_run(printer: str, cmd: List[str], output: str) -> PrintResult:
+        return PrintResult(
+            success=True,
+            printer=printer,
+            job_id="DRY-RUN-0",
+            command_run=cmd,
+            output=output,
+            dry_run=True,
+        )
+
+    # ---- RAW datatype (printer-language data: PostScript, PCL, or `-o raw`) ----
+
+    def _spool(self, printer: str, title: str, settings: Dict[str, Any], payload: Union[bytes, Path],
+               cmd: List[str]) -> PrintResult:
+        api = self._api()
         try:
             devmode = self._build_devmode(printer, settings)
             defaults: Dict[str, Any] = {"DesiredAccess": PRINTER_ACCESS_USE, "pDatatype": "RAW"}
@@ -304,36 +587,121 @@ class Win32Backend(PrinterBackend):
         finally:
             api.ClosePrinter(handle)
 
-        request_id = f"{printer}-{job_id}"
-        return PrintResult(
-            success=True,
-            printer=printer,
-            job_id=request_id,
-            command_run=cmd,
-            output=f"request id is {request_id} (1 file(s))",
-        )
+        return self._success(printer, job_id, cmd)
 
     @staticmethod
-    def _page_sequence(opts: PrintJobOptions) -> Optional[List[int]]:
-        """Expand page ranges / repeat into an explicit page list (DEVMODE has no page ranges)."""
-        if opts.page_ranges:
-            pages: List[int] = []
-            for token in (t.strip() for t in opts.page_ranges.split(",")):
-                if not token:
-                    continue
-                if "-" in token:
-                    start, _, end = token.partition("-")
-                    if not start.strip() or not end.strip():
-                        raise DocumentConversionError(
-                            f"Open-ended page range '{token}' is not supported on Windows."
-                        )
-                    pages.extend(range(int(start), int(end) + 1))
-                else:
-                    pages.append(int(token))
-            return pages or None
-        if opts.repeat and opts.repeat > 1:
-            return [1] * opts.repeat
-        return None
+    @contextmanager
+    def _raw_page_selection(path: Path, opts: PrintJobOptions) -> Iterator[Path]:
+        """Apply page ranges / repeat to a PDF before RAW spooling (pypdf)."""
+        if not (opts.page_ranges or (opts.repeat and opts.repeat > 1)):
+            yield path
+            return
+        if path.suffix.lower() != ".pdf":
+            logger.warning("Page ranges / repeat are ignored for RAW %s data", path.suffix or "binary")
+            yield path
+            return
+        try:
+            import pypdf
+        except ImportError:
+            raise DocumentConversionError(
+                "pypdf is required to select pages for RAW printing on Windows: pip install pypdf"
+            )
+        total = len(pypdf.PdfReader(str(path)).pages)
+        order = select_pages(opts, total)
+        if not order:
+            raise DocumentConversionError("No pages selected for printing.")
+        if order == list(range(1, total + 1)):
+            yield path
+            return
+        with DocumentConverter.prepare_for_print(path, page_sequence=order) as selected:
+            yield Path(selected)
+
+    def _submit_file_raw(self, target_path: Path, opts: PrintJobOptions, title: str,
+                         driver: Dict[str, str], force_pdf_conversion: bool) -> PrintResult:
+        printer = opts.printer or ""
+        force_pdf = force_pdf_conversion or target_path.suffix.lower() not in RAW_PASSTHROUGH_EXTENSIONS
+        with DocumentConverter.prepare_for_print(target_path, force_pdf=force_pdf) as converted:
+            with self._raw_page_selection(Path(converted), opts) as printable_path:
+                settings = opts.build_devmode_settings()
+                if opts.dry_run:
+                    cmd = self._describe(printer, title, "raw", settings, list(driver.items()), str(printable_path))
+                    return self._dry_run(printer, cmd, "Dry run executed successfully. No job sent to printer.")
+                settings.update(self._driver_settings(printer, driver))
+                cmd = self._describe(printer, title, "raw", settings, list(driver.items()), str(printable_path))
+                return self._spool(printer, title, settings, printable_path, cmd)
+
+    # ---- GDI rendering (PDF, images, text, Office documents) ----
+
+    def _dry_run_gdi(self, printer: str, title: str, opts: PrintJobOptions, driver: Dict[str, str],
+                     open_pages: Callable[[Tuple[float, float]], Any], source: Optional[str],
+                     output: str) -> PrintResult:
+        with open_pages(LETTER_PT) as pages:
+            if not select_pages(opts, len(pages)):
+                raise DocumentConversionError("No pages selected for printing.")
+        cmd = self._describe(printer, title, "gdi", opts.build_devmode_settings(),
+                             self._layout_args(opts, driver, 1), source)
+        return self._dry_run(printer, cmd, output)
+
+    def _print_gdi(self, printer: str, title: str, opts: PrintJobOptions, driver: Dict[str, str],
+                   open_pages: Callable[[Tuple[float, float]], Any], source: Optional[str]) -> PrintResult:
+        api = self._api()
+        gdi = self._gdi()
+        settings = opts.build_devmode_settings()
+        settings.update(self._driver_settings(printer, driver))
+
+        emulated_copies = 1
+        if opts.copies > 1 and self._hardware_copies(printer) < opts.copies:
+            emulated_copies = settings["Copies"]
+            settings["Copies"] = 1
+        cmd = self._describe(printer, title, "gdi", settings, self._layout_args(opts, driver, emulated_copies), source)
+
+        try:
+            devmode = self._build_devmode(printer, settings)
+            hdc = gdi.CreateDC("WINSPOOL", printer, devmode)
+        except Exception as e:
+            return PrintResult(success=False, printer=printer, command_run=cmd, error=str(e))
+
+        try:
+            geom = self._geometry(hdc)
+            with open_pages(geom.page_size_pt) as pages:
+                order = select_pages(opts, len(pages))
+                if not order:
+                    raise DocumentConversionError("No pages selected for printing.")
+                sheets = plan_sheets(
+                    [pages[i - 1] for i in order],
+                    resolve_number_up(opts),
+                    copies=emulated_copies,
+                    collate=opts.collate is not False,
+                    duplex=opts.duplex in (DuplexMode.TWO_SIDED_LONG_EDGE, DuplexMode.TWO_SIDED_SHORT_EDGE),
+                )
+                grayscale = opts.color_mode == ColorMode.MONOCHROME
+                job_id = api.StartDoc(hdc, (title, None, None, 0))
+                try:
+                    for sheet in sheets:
+                        api.StartPage(hdc)
+                        for placement in layout_sheet(sheet, geom, opts):
+                            self._draw(hdc, render_placement(placement, geom, grayscale), placement.rect)
+                        api.EndPage(hdc)
+                    api.EndDoc(hdc)
+                except Exception:
+                    abort = getattr(api, "AbortDoc", None)
+                    if abort is not None:
+                        try:
+                            abort(hdc)
+                        except Exception:
+                            pass
+                    raise
+        except DocumentConversionError:
+            raise
+        except Exception as e:
+            return PrintResult(success=False, printer=printer, command_run=cmd, error=str(e))
+        finally:
+            try:
+                gdi.DeleteDC(hdc)
+            except Exception:
+                pass
+
+        return self._success(printer, job_id, cmd)
 
     def submit_file(
         self,
@@ -341,40 +709,46 @@ class Win32Backend(PrinterBackend):
         opts: PrintJobOptions,
         force_pdf_conversion: bool = False,
     ) -> PrintResult:
-        target_printer = opts.printer or ""
+        printer = opts.printer or ""
         title = opts.title or target_path.name
-        page_sequence = self._page_sequence(opts)
-        force_pdf = force_pdf_conversion or target_path.suffix.lower() not in RAW_PASSTHROUGH_EXTENSIONS
+        eff, driver, raw_mode = self._effective_options(opts)
 
-        with DocumentConverter.prepare_for_print(
-            target_path, force_pdf=force_pdf, page_sequence=page_sequence
-        ) as printable_path:
-            if opts.dry_run:
-                return PrintResult(
-                    success=True,
-                    printer=target_printer,
-                    job_id="DRY-RUN-0",
-                    command_run=self._describe(
-                        target_printer, title, opts.build_devmode_settings(), str(printable_path)
-                    ),
-                    output="Dry run executed successfully. No job sent to printer.",
-                    dry_run=True,
-                )
-            return self._spool(target_printer, title, opts, Path(printable_path))
+        if raw_mode or target_path.suffix.lower() in RAW_EXTENSIONS:
+            return self._submit_file_raw(target_path, eff, title, driver, force_pdf_conversion)
+
+        path = target_path.expanduser().resolve()
+        if not path.exists():
+            raise FileNotFoundError(f"Document file does not exist: {path}")
+
+        def open_pages(size: Tuple[float, float]) -> Any:
+            return open_document(path, size)
+
+        if eff.dry_run:
+            return self._dry_run_gdi(printer, title, eff, driver, open_pages, str(path),
+                                     "Dry run executed successfully. No job sent to printer.")
+        return self._print_gdi(printer, title, eff, driver, open_pages, str(path))
 
     def submit_bytes(self, data: bytes, opts: PrintJobOptions) -> PrintResult:
-        target_printer = opts.printer or ""
+        printer = opts.printer or ""
         title = opts.title or "Untitled Document"
-        if opts.dry_run:
-            return PrintResult(
-                success=True,
-                printer=target_printer,
-                job_id="DRY-RUN-0",
-                command_run=self._describe(target_printer, title, opts.build_devmode_settings(), None),
-                output="Dry run bytes submission.",
-                dry_run=True,
-            )
-        return self._spool(target_printer, title, opts, data)
+        eff, driver, raw_mode = self._effective_options(opts)
+        kind = None if raw_mode else sniff_bytes(data)
+
+        if kind is None:
+            settings = eff.build_devmode_settings()
+            if eff.dry_run:
+                cmd = self._describe(printer, title, "raw", settings, list(driver.items()), None)
+                return self._dry_run(printer, cmd, "Dry run bytes submission.")
+            settings.update(self._driver_settings(printer, driver))
+            cmd = self._describe(printer, title, "raw", settings, list(driver.items()), None)
+            return self._spool(printer, title, settings, data, cmd)
+
+        def open_pages(size: Tuple[float, float]) -> Any:
+            return open_bytes(data, kind)
+
+        if eff.dry_run:
+            return self._dry_run_gdi(printer, title, eff, driver, open_pages, None, "Dry run bytes submission.")
+        return self._print_gdi(printer, title, eff, driver, open_pages, None)
 
     # =========================================================================
     # QUEUE & JOB MANAGEMENT

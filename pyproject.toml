@@ -54,6 +54,7 @@ windows = [
     "pywin32>=306; sys_platform == 'win32'",
     "pypdf>=3.17.0; sys_platform == 'win32'",
     "Pillow>=10.2.0; sys_platform == 'win32'",
+    "pypdfium2>=4.25.0; sys_platform == 'win32'",
 ]
 
 [project.scripts]
