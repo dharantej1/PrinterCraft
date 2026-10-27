@@ -155,59 +155,511 @@ printer-craft cancel HP_LaserJet_Professional_M1136_MFP --all
 
 ## 🐍 Python API Usage
 
-### Basic Printing
+### 1. Setup — `PrinterManager`
+
+`PrinterManager` is the main entry point. It auto-discovers CUPS binaries but
+allows you to override them for custom CUPS installations.
 
 ```python
-from printer_craft import PrinterManager, PrintJobOptions, DuplexMode, ColorMode
+from printer_craft import PrinterManager
 
+# Default: auto-discovers lp, lpstat, lpoptions, cancel from PATH / /usr/bin
 mgr = PrinterManager()
 
-# Submit a print job
-options = PrintJobOptions(
-    copies=1,
-    duplex=DuplexMode.TWO_SIDED_LONG_EDGE,
-    color_mode=ColorMode.MONOCHROME,
-    media="A4",
-    fit_to_page=True,
-    dry_run=False,
+# Override individual binaries (e.g. custom CUPS install)
+mgr = PrinterManager(
+    lp_bin="/opt/cups/bin/lp",
+    lpstat_bin="/opt/cups/bin/lpstat",
+    lpoptions_bin="/opt/cups/bin/lpoptions",
+    cancel_bin="/opt/cups/bin/cancel",
 )
-
-result = mgr.print_document("invoice.pdf", options=options)
-if result.success:
-    print(f"Printed to {result.printer}, Job ID: {result.job_id}")
-else:
-    print(f"Error: {result.error}")
 ```
 
-### Querying Printers and Options
+---
+
+### 2. Discovering Printers
+
+#### `list_printers(load_options=False)` → `List[Printer]`
+
+Returns all installed printers. Pass `load_options=True` to eagerly load each
+printer's PPD hardware options in a single call.
 
 ```python
 from printer_craft import PrinterManager
 
 mgr = PrinterManager()
 
-# Discover all printers
+# Basic list (fast — no PPD option loading)
+printers = mgr.list_printers()
+for p in printers:
+    print(f"{p.name}  status={p.status}  default={p.is_default}")
+
+# With hardware options pre-loaded
 printers = mgr.list_printers(load_options=True)
-for printer in printers:
-    print(f"Printer: {printer.name} (Default: {printer.is_default})")
-    for key, opt in printer.options.items():
+for p in printers:
+    print(f"\n{p.name}  [default={p.is_default}]")
+    for key, opt in p.options.items():
         default_val = opt.default_choice.name if opt.default_choice else "None"
-        print(f"  {opt.keyword}: default={default_val}")
+        choices     = ", ".join(c.name for c in opt.choices)
+        print(f"  {opt.keyword} ({opt.display_name}): default={default_val}  choices=[{choices}]")
 ```
 
-### Streaming In-Memory PDF Bytes
+#### `get_default_printer()` → `Optional[Printer]`
+
+Returns the system default printer, or `None` if no printers are configured.
+
+```python
+default = mgr.get_default_printer()
+if default:
+    print(f"Default printer: {default.name}")
+else:
+    print("No printers configured.")
+```
+
+#### `get_printer(name, load_options=True)` → `Optional[Printer]`
+
+Look up a single printer by its exact CUPS name.
+
+```python
+printer = mgr.get_printer("HP_LaserJet_Professional_M1136_MFP")
+if printer:
+    print(f"Found: {printer.name}  status={printer.status}")
+else:
+    print("Printer not found.")
+```
+
+---
+
+### 3. Inspecting PPD Hardware Options
+
+#### `get_printer_options(printer_name)` → `Dict[str, PrinterOption]`
+
+Executes `lpoptions -p <name> -l` and parses the printer's PostScript Printer
+Description (PPD) key→value table. Each `PrinterOption` contains its keyword,
+human-readable display name, and a list of `PrinterOptionChoice` objects.
+
+```python
+from printer_craft import PrinterManager
+
+mgr     = PrinterManager()
+options = mgr.get_printer_options("HP_LaserJet_Professional_M1136_MFP")
+
+for keyword, opt in options.items():
+    default = opt.default_choice
+    print(f"{opt.keyword} [{opt.display_name}]")
+    print(f"  Default : {default.name if default else 'None'}")
+    for choice in opt.choices:
+        marker = " *" if choice.is_default else "  "
+        print(f"  {marker} {choice.name}")
+```
+
+You can also get options through a `Printer` object when `load_options=True`:
+
+```python
+printer = mgr.get_printer("HP_LaserJet_Professional_M1136_MFP", load_options=True)
+page_size_opt = printer.options.get("PageSize")
+if page_size_opt:
+    print("Supported paper sizes:", [c.name for c in page_size_opt.choices])
+```
+
+Serialize all options to a plain dict (e.g. for JSON output):
+
+```python
+import json
+printer = mgr.get_printer("HP_LaserJet_Professional_M1136_MFP", load_options=True)
+print(json.dumps(printer.to_dict(), indent=2))
+```
+
+---
+
+### 4. `PrintJobOptions` — All Parameters
+
+`PrintJobOptions` is a dataclass that holds every configurable option for a
+print job. All fields are optional (with sensible defaults).
+
+```python
+from printer_craft import (
+    PrintJobOptions,
+    DuplexMode,
+    ColorMode,
+    Orientation,
+    PrintScaling,
+)
+
+options = PrintJobOptions(
+    # Target printer (None → system default)
+    printer="HP_LaserJet_Professional_M1136_MFP",
+
+    # Number of copies (1–999)
+    copies=2,
+
+    # Job title shown in CUPS queue
+    title="Q4 Financial Report",
+
+    # Two-sided printing
+    # DuplexMode.ONE_SIDED | TWO_SIDED_LONG_EDGE | TWO_SIDED_SHORT_EDGE
+    duplex=DuplexMode.TWO_SIDED_LONG_EDGE,
+
+    # Collation across multiple copies
+    # True  → sets in order: 1,2,3 | 1,2,3
+    # False → grouped:       1,1   | 2,2   | 3,3
+    collate=True,
+
+    # Color mode
+    # ColorMode.MONOCHROME | COLOR | AUTO
+    color_mode=ColorMode.MONOCHROME,
+
+    # Paper size (must match a PPD PageSize choice)
+    media="A4",
+
+    # Page ranges — standard CUPS syntax
+    # Examples: "1-5", "2,4,7", "1-3,5", "3-"
+    # Non-monotonic sequences like "1,1,1,1" are handled automatically via PDFKit
+    page_ranges="1-10",
+
+    # Page orientation
+    # Orientation.PORTRAIT | LANDSCAPE | REVERSE_LANDSCAPE | REVERSE_PORTRAIT
+    orientation=Orientation.PORTRAIT,
+
+    # Scale document to fit printable area (default True, mirrors PdfCraft.app)
+    fit_to_page=True,
+
+    # CUPS IPP print-scaling policy (separate from fit_to_page)
+    # PrintScaling.AUTO | AUTO_FIT | FIT_TO_PAGE | FILL | NONE
+    scaling=PrintScaling.AUTO_FIT,
+
+    # N-Up: pages per physical sheet (1, 2, 4, 6, 9, or 16)
+    number_up=2,
+
+    # Repeat: duplicate the document N times before spooling
+    # Useful with number_up (e.g. repeat=4, number_up=4 → 4 IDs on one sheet)
+    repeat=1,
+
+    # Raw PPD / driver-specific key=value overrides
+    raw_options={
+        "InputSlot": "Manual",
+        "Resolution": "600dpi",
+        "pjlDensity": "3",
+    },
+
+    # Dry-run: build and return the lp command without sending to hardware
+    dry_run=False,
+)
+```
+
+---
+
+### 5. Printing a Document File
+
+#### `print_document(file_path, options=None, force_pdf_conversion=False)` → `PrintResult`
+
+Accepts any supported file type (`.pdf`, `.docx`, `.rtf`, `.odt`, `.png`,
+`.jpg`, `.tiff`, `.heic`, `.txt`, `.py`, `.md`). Non-PDF formats are
+auto-converted using native macOS tools (`textutil`, `sips`, `cupsfilter`).
+
+```python
+from printer_craft import (
+    PrinterManager, PrintJobOptions,
+    DuplexMode, ColorMode, Orientation, PrintScaling,
+)
+
+mgr = PrinterManager()
+
+# --- Example 1: Simple one-sided monochrome PDF ---
+result = mgr.print_document(
+    "invoice.pdf",
+    options=PrintJobOptions(
+        copies=1,
+        duplex=DuplexMode.ONE_SIDED,
+        color_mode=ColorMode.MONOCHROME,
+        media="A4",
+        fit_to_page=True,
+    ),
+)
+if result.success:
+    print(f"Job submitted → {result.printer}  ID: {result.job_id}")
+else:
+    print(f"Failed: {result.error}")
+
+
+# --- Example 2: Two-sided, 2-up landscape handout (pages 1–20) ---
+result = mgr.print_document(
+    "slides.pdf",
+    options=PrintJobOptions(
+        copies=30,
+        duplex=DuplexMode.TWO_SIDED_LONG_EDGE,
+        collate=True,
+        media="A4",
+        page_ranges="1-20",
+        number_up=2,
+        orientation=Orientation.LANDSCAPE,
+    ),
+)
+
+
+# --- Example 3: Print 4 copies of a 1-page ID card on one sheet ---
+# repeat=4 duplicates the page 4 times before spooling;
+# number_up=4 arranges all 4 on a single physical sheet.
+result = mgr.print_document(
+    "id_card.pdf",
+    options=PrintJobOptions(
+        repeat=4,
+        number_up=4,
+        duplex=DuplexMode.ONE_SIDED,
+        fit_to_page=True,
+    ),
+)
+
+
+# --- Example 4: Non-monotonic page sequence (handled automatically) ---
+# Prints page 1 four times; PDFKit pre-synthesizes the repeated PDF
+# so CUPS never sees "Bad page-ranges values".
+result = mgr.print_document(
+    "application_form.pdf",
+    options=PrintJobOptions(
+        page_ranges="1,1,1,1",
+        number_up=2,
+        duplex=DuplexMode.TWO_SIDED_SHORT_EDGE,
+    ),
+)
+
+
+# --- Example 5: Word / RTF / text file (auto-converted before spooling) ---
+result = mgr.print_document(
+    "contract.docx",
+    options=PrintJobOptions(fit_to_page=True),
+)
+
+
+# --- Example 6: Custom PPD hardware overrides ---
+result = mgr.print_document(
+    "label.pdf",
+    options=PrintJobOptions(
+        media="Custom.62x100mm",
+        raw_options={"InputSlot": "Manual", "pjlDensity": "4"},
+    ),
+)
+
+
+# --- Example 7: Force intermediate PDF conversion ---
+result = mgr.print_document(
+    "photo.heic",
+    options=PrintJobOptions(media="A4"),
+    force_pdf_conversion=True,
+)
+
+
+# --- Example 8: Dry-run — inspect the lp command without printing ---
+result = mgr.print_document(
+    "document.pdf",
+    options=PrintJobOptions(
+        copies=3,
+        duplex=DuplexMode.TWO_SIDED_SHORT_EDGE,
+        dry_run=True,
+    ),
+)
+print("Would run:", " ".join(result.command_run))
+```
+
+---
+
+### 6. Printing Raw Bytes (In-Memory PDF Stream)
+
+#### `print_bytes(data, title, options=None)` → `PrintResult`
+
+Streams a bytes object (PDF or PostScript) directly to `/usr/bin/lp` stdin,
+identical to `PdfCraft::craft_print::submit_with_progress`.
+
+```python
+from printer_craft import PrinterManager, PrintJobOptions, DuplexMode, ColorMode
+
+mgr = PrinterManager()
+
+# Minimal valid 1-page PDF
+minimal_pdf = b"""%PDF-1.4
+1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
+2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj
+3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]
+           /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >> endobj
+4 0 obj << /Length 44 >> stream
+BT /F1 24 Tf 100 700 Td (Hello, Printer!) Tj ET
+endstream endobj
+5 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj
+xref
+0 6
+0000000000 65535 f
+0000000009 00000 n
+0000000058 00000 n
+0000000115 00000 n
+0000000266 00000 n
+0000000360 00000 n
+trailer << /Root 1 0 R /Size 6 >>
+startxref
+441
+%%EOF"""
+
+result = mgr.print_bytes(
+    minimal_pdf,
+    title="Generated Invoice #1042",
+    options=PrintJobOptions(
+        copies=2,
+        duplex=DuplexMode.TWO_SIDED_LONG_EDGE,
+        color_mode=ColorMode.MONOCHROME,
+        number_up=2,
+        raw_options={"InputSlot": "Manual", "pjlDensity": "3"},
+        dry_run=True,  # Remove to actually print
+    ),
+)
+
+print(f"Printer : {result.printer}")
+print(f"Job ID  : {result.job_id}")
+print(f"Command : {' '.join(result.command_run)}")
+```
+
+---
+
+### 7. Queue Management
+
+#### `get_jobs(printer_name=None)` → `List[Dict]`
+
+Lists active CUPS jobs. Pass a printer name to filter by printer.
+
+```python
+from printer_craft import PrinterManager
+
+mgr  = PrinterManager()
+jobs = mgr.get_jobs()  # all printers
+
+for job in jobs:
+    print(f"  {job['job_id']}  user={job['user']}  size={job['size_bytes']}B  date={job['date']}")
+
+# Filter to a specific printer
+jobs = mgr.get_jobs("HP_LaserJet_Professional_M1136_MFP")
+```
+
+#### `cancel_job(job_id_or_printer, purge_all=False)` → `bool`
+
+Cancel a single job by its CUPS job ID, or purge all jobs for a printer.
+
+```python
+# Cancel a specific job
+cancelled = mgr.cancel_job("HP_LaserJet_Professional_M1136_MFP-104")
+print("Cancelled:", cancelled)
+
+# Purge all pending jobs for a printer
+mgr.cancel_job("HP_LaserJet_Professional_M1136_MFP", purge_all=True)
+```
+
+---
+
+### 8. Error Handling
+
+All exceptions inherit from `PrinterError`. Catch them individually for
+granular recovery, or catch the base class for a catch-all.
+
+```python
+from printer_craft import (
+    PrinterManager, PrintJobOptions,
+    PrinterError,
+    PrinterNotFoundError,
+    SpoolerUnavailableError,
+    DocumentConversionError,
+    PrintExecutionError,
+)
+
+mgr = PrinterManager()
+
+try:
+    result = mgr.print_document(
+        "report.pdf",
+        options=PrintJobOptions(printer="NonExistentPrinter"),
+    )
+except PrinterNotFoundError as e:
+    # Raised when no printer is found / specified printer doesn't exist
+    print(f"Printer not found: {e}")
+
+except SpoolerUnavailableError as e:
+    # Raised when the CUPS daemon is not running or unreachable
+    print(f"CUPS spooler is down: {e}")
+
+except DocumentConversionError as e:
+    # Raised when textutil / sips / cupsfilter conversion fails
+    print(f"Could not convert document: {e}")
+
+except PrintExecutionError as e:
+    # Raised when /usr/bin/lp exits with a non-zero return code
+    print(f"lp command failed (exit {e.return_code}): {e}")
+    print(f"Command: {' '.join(e.command)}")
+
+except FileNotFoundError as e:
+    # Raised by print_document when the input file doesn't exist
+    print(f"File not found: {e}")
+
+except PrinterError as e:
+    # Catch-all for any other printer_craft error
+    print(f"Printer error: {e}")
+```
+
+---
+
+### 9. Enum Reference
+
+```python
+from printer_craft import DuplexMode, ColorMode, Orientation, PrintScaling
+
+# DuplexMode
+DuplexMode.ONE_SIDED            # → sides=one-sided
+DuplexMode.TWO_SIDED_LONG_EDGE  # → sides=two-sided-long-edge  (portrait book flip)
+DuplexMode.TWO_SIDED_SHORT_EDGE # → sides=two-sided-short-edge (notepad / calendar flip)
+
+# Parse from string (case-insensitive, accepts aliases)
+DuplexMode.from_str("duplex")          # → TWO_SIDED_LONG_EDGE
+DuplexMode.from_str("tumble")          # → TWO_SIDED_SHORT_EDGE
+DuplexMode.from_str("one-sided")       # → ONE_SIDED
+
+# ColorMode
+ColorMode.MONOCHROME  # → print-color-mode=monochrome
+ColorMode.COLOR       # → print-color-mode=color
+ColorMode.AUTO        # (no -o flag generated)
+
+ColorMode.from_str("gray")    # → MONOCHROME
+ColorMode.from_str("colour")  # → COLOR
+
+# Orientation  (CUPS orientation-requested numeric values)
+Orientation.PORTRAIT          # → orientation-requested=3
+Orientation.LANDSCAPE         # → orientation-requested=4  (90° CCW)
+Orientation.REVERSE_LANDSCAPE # → orientation-requested=5  (90° CW)
+Orientation.REVERSE_PORTRAIT  # → orientation-requested=6  (180°)
+
+Orientation.from_str("landscape") # → LANDSCAPE
+
+# PrintScaling
+PrintScaling.AUTO        # → print-scaling=auto
+PrintScaling.AUTO_FIT    # → print-scaling=auto-fit
+PrintScaling.FIT_TO_PAGE # → print-scaling=fit-to-page
+PrintScaling.FILL        # → print-scaling=fill
+PrintScaling.NONE        # → print-scaling=none
+```
+
+---
+
+### 10. Inspecting `PrintResult`
+
+Every `print_document` / `print_bytes` call returns a `PrintResult` dataclass.
 
 ```python
 from printer_craft import PrinterManager, PrintJobOptions
 
-mgr = PrinterManager()
-pdf_data = b"%PDF-1.4 ... binary data ..."
+mgr    = PrinterManager()
+result = mgr.print_document("doc.pdf", options=PrintJobOptions(dry_run=True))
 
-result = mgr.print_bytes(
-    pdf_data,
-    title="In-Memory Report",
-    options=PrintJobOptions(copies=1),
-)
+result.success      # bool   — True if job submitted (or dry-run)
+result.printer      # str    — resolved target printer name
+result.job_id       # Optional[str]  — e.g. "HP_LaserJet-104"  (None on dry-run)
+result.command_run  # List[str]      — exact argv passed to /usr/bin/lp
+result.output       # str    — raw stdout from lp
+result.error        # Optional[str]  — error message if success=False
+result.dry_run      # bool   — True when options.dry_run was set
 ```
 
 ---
