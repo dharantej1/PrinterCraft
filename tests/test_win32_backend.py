@@ -204,7 +204,7 @@ class TestWin32RawSubmission(Win32TestCase):
         self.api.EndDocPrinter.assert_called_once_with(HANDLE)
 
         defaults = self.api.OpenPrinter.call_args_list[-1][0][1]
-        self.assertEqual(defaults["pDatatype"], "RAW")
+        self.assertNotIn("pDatatype", defaults)  # rejected by pywin32; datatype is set in StartDocPrinter
         dm = defaults["pDevMode"]
         self.assertEqual(dm.Copies, 3)
         self.assertEqual(dm.Duplex, 3)

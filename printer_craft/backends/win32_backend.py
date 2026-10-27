@@ -577,10 +577,13 @@ class Win32Backend(PrinterBackend):
         api = self._api()
         try:
             devmode = self._build_devmode(printer, settings)
-            defaults: Dict[str, Any] = {"DesiredAccess": PRINTER_ACCESS_USE, "pDatatype": "RAW"}
+            defaults: Dict[str, Any] = {"DesiredAccess": PRINTER_ACCESS_USE}
             if devmode is not None:
                 defaults["pDevMode"] = devmode
-            handle = api.OpenPrinter(printer, defaults)
+            try:
+                handle = api.OpenPrinter(printer, defaults)
+            except TypeError:
+                handle = api.OpenPrinter(printer, {"DesiredAccess": PRINTER_ACCESS_USE})
         except Exception as e:
             return PrintResult(success=False, printer=printer, command_run=cmd, error=str(e))
 
