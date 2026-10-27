@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "printer-craft"
 dynamic = ["version"]
-description = "Universal document printing library and CLI for macOS and Unix, reverse-engineered from PdfCraft.app"
+description = "Universal document printing library and CLI for macOS, Unix and Windows, reverse-engineered from PdfCraft.app"
 readme = "README.md"
 authors = [
     { name = "Open Source Community" }
@@ -16,6 +16,7 @@ classifiers = [
     "Intended Audience :: Developers",
     "Intended Audience :: System Administrators",
     "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
@@ -26,7 +27,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Topic :: Utilities",
 ]
-keywords = ["cups", "printing", "printer", "pdf", "macos", "reverse-engineering", "lp", "lpoptions"]
+keywords = ["cups", "printing", "printer", "pdf", "macos", "reverse-engineering", "lp", "lpoptions", "windows", "win32print"]
 requires-python = ">=3.9"
 dependencies = []
 
@@ -48,6 +49,11 @@ dev = [
 extras = [
     "pypdf>=3.17.0",
     "Pillow>=10.2.0",
+]
+windows = [
+    "pywin32>=306; sys_platform == 'win32'",
+    "pypdf>=3.17.0; sys_platform == 'win32'",
+    "Pillow>=10.2.0; sys_platform == 'win32'",
 ]
 
 [project.scripts]

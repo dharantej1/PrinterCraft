@@ -1,6 +1,7 @@
 """
 Document converter supporting seamless printing of any document or image type.
 Uses native macOS utilities (cupsfilter, textutil, sips) without third-party bloat.
+On Windows, falls back to pypdf, Pillow and LibreOffice/docx2pdf.
 """
 
 from __future__ import annotations
@@ -8,6 +9,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
@@ -125,6 +127,9 @@ class DocumentConverter:
 
     @classmethod
     def _convert_to_base_pdf(cls, path: Path, suffix: str, output_pdf: Path) -> None:
+        if sys.platform == "win32":
+            cls._convert_to_base_pdf_windows(path, suffix, output_pdf)
+            return
         if suffix in TEXTUTIL_EXTENSIONS:
             cls._convert_textutil_to_pdf(path, output_pdf)
         elif suffix in IMAGE_EXTENSIONS:
@@ -154,7 +159,10 @@ class DocumentConverter:
                 writer.write(f_out)
             return
         except ImportError:
-            pass
+            if sys.platform == "win32":
+                raise DocumentConversionError(
+                    "pypdf is required to duplicate/rearrange pages on Windows: pip install pypdf"
+                )
 
         # 2. Fallback to native macOS PDFKit via JXA (zero-dependency)
         import json
@@ -258,3 +266,88 @@ class DocumentConverter:
                 return b"\x00" not in chunk
         except Exception:
             return False
+
+    # =========================================================================
+    # WINDOWS FALLBACKS (only used when sys.platform == "win32")
+    # =========================================================================
+
+    @classmethod
+    def _convert_to_base_pdf_windows(cls, path: Path, suffix: str, output_pdf: Path) -> None:
+        if suffix in IMAGE_EXTENSIONS:
+            cls._convert_image_to_pdf_pillow(path, output_pdf)
+        elif suffix in TEXTUTIL_EXTENSIONS or cls._is_plain_text(path):
+            cls._convert_office_to_pdf_windows(path, suffix, output_pdf)
+        else:
+            raise DocumentConversionError(
+                f"Cannot convert {path.name} to PDF on Windows: unsupported format '{suffix}'."
+            )
+
+    @staticmethod
+    def _convert_image_to_pdf_pillow(input_path: Path, output_pdf: Path) -> None:
+        """Convert an image (all frames for multi-page TIFF/GIF) to PDF using Pillow."""
+        try:
+            from PIL import Image, ImageSequence
+        except ImportError:
+            raise DocumentConversionError(
+                "Pillow is required to print images on Windows: pip install Pillow"
+            )
+        try:
+            with Image.open(input_path) as img:
+                frames = [frame.convert("RGB") for frame in ImageSequence.Iterator(img)]
+            frames[0].save(output_pdf, "PDF", save_all=True, append_images=frames[1:])
+        except Exception as e:
+            raise DocumentConversionError(f"Failed to convert image {input_path.name} to PDF: {e}")
+        if not output_pdf.exists() or output_pdf.stat().st_size == 0:
+            raise DocumentConversionError(f"Failed to convert image {input_path.name} to PDF.")
+
+    @staticmethod
+    def _find_soffice() -> Optional[str]:
+        found = shutil.which("soffice") or shutil.which("soffice.exe")
+        if found:
+            return found
+        for env_var in ("PROGRAMFILES", "PROGRAMFILES(X86)"):
+            base = os.environ.get(env_var)
+            if base:
+                candidate = Path(base) / "LibreOffice" / "program" / "soffice.exe"
+                if candidate.exists():
+                    return str(candidate)
+        return None
+
+    @classmethod
+    def _convert_office_to_pdf_windows(cls, input_path: Path, suffix: str, output_pdf: Path) -> None:
+        """Convert Office/RTF/HTML/text documents via LibreOffice headless, or docx2pdf (MS Word)."""
+        soffice = cls._find_soffice()
+        if soffice:
+            out_dir = Path(tempfile.mkdtemp(prefix="soffice_", dir=str(output_pdf.parent)))
+            try:
+                cmd = [soffice, "--headless", "--convert-to", "pdf", "--outdir", str(out_dir), str(input_path)]
+                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                produced = out_dir / f"{input_path.stem}.pdf"
+                if res.returncode != 0 or not produced.exists():
+                    raise DocumentConversionError(
+                        f"LibreOffice failed converting {input_path.name}: "
+                        f"{res.stderr.strip() or res.stdout.strip()}"
+                    )
+                shutil.move(str(produced), str(output_pdf))
+            finally:
+                shutil.rmtree(out_dir, ignore_errors=True)
+            return
+
+        if suffix in (".docx", ".doc"):
+            try:
+                from docx2pdf import convert as docx2pdf_convert
+            except ImportError:
+                docx2pdf_convert = None
+            if docx2pdf_convert is not None:
+                try:
+                    docx2pdf_convert(str(input_path), str(output_pdf))
+                except Exception as e:
+                    raise DocumentConversionError(f"docx2pdf failed converting {input_path.name}: {e}")
+                if not output_pdf.exists():
+                    raise DocumentConversionError(f"docx2pdf failed converting {input_path.name}.")
+                return
+
+        raise DocumentConversionError(
+            f"Cannot convert {input_path.name} to PDF on Windows: install LibreOffice "
+            "(soffice) or, for Word documents, docx2pdf with Microsoft Word."
+        )

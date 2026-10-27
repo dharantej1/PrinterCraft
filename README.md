@@ -2,9 +2,9 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
-[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg)](https://www.cups.org/)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg)](https://www.cups.org/)
 
-**printer-craft** is a Python library and CLI tool for discovering printers, querying hardware PPD options, and submitting print jobs on macOS and Unix systems.
+**printer-craft** is a Python library and CLI tool for discovering printers, querying hardware PPD options, and submitting print jobs on macOS and Unix systems (via CUPS) and on Windows (via the Windows print spooler).
 
 The core communication architecture was **reverse-engineered from the native macOS desktop application `PdfCraft.app`**, extracting its exact CUPS subprocess pipeline, environment handling, PPD parser, and argument builder.
 
@@ -59,6 +59,13 @@ pip install .
 ```bash
 pip install -e .
 ```
+
+### Windows
+```bash
+pip install ".[windows]"
+```
+The `windows` extra installs `pywin32` (plus `pypdf` and `Pillow` for document
+conversion) and is a no-op on macOS/Linux. See [Windows Support](#-windows-support).
 
 ---
 
@@ -716,6 +723,32 @@ result.dry_run      # bool   — True when options.dry_run was set
 
 ---
 
+## 🪟 Windows Support
+
+On Windows (`sys.platform == "win32"`), `PrinterManager` dispatches to
+`printer_craft.backends.Win32Backend` instead of the CUPS backend. The public API
+and `PrintResult` shape are the same; on macOS/Linux nothing changes.
+
+| Operation | Windows implementation |
+| --- | --- |
+| Discovery | `win32print.EnumPrinters` / `GetDefaultPrinter` |
+| Driver options | `DeviceCapabilities` (paper sizes, trays, duplex, color, collate) with defaults from the printer `DEVMODE` |
+| Printing | `StartDocPrinter` / `WritePrinter` with the `RAW` datatype; options applied via `DocumentProperties` on the job `DEVMODE` |
+| Queue | `EnumJobs` / `SetJob(JOB_CONTROL_CANCEL)`; job ids look like `<printer>-<id>` |
+| Conversion | `pypdf` (page ranges/repetition), `Pillow` (images), LibreOffice `soffice --convert-to pdf` or `docx2pdf` (Office docs) |
+
+Notes and limitations:
+- `RAW` spooling sends the document bytes unchanged, so the printer must understand
+  the format (PDF-direct or PostScript printers). Images and Office documents are converted to PDF first.
+- Supported options: copies, collate, duplex, color mode, orientation (reverse variants map to
+  portrait/landscape) and media (common CUPS/PWG names such as `A4`, `Letter`,
+  `iso_a4_210x297mm`; other values are used as a Windows form name).
+  Page ranges are applied by rewriting the PDF with `pypdf`; open-ended ranges like `3-` are not supported.
+- `raw_options`, `fit_to_page`, `scaling` and `number_up` are CUPS-only and ignored on Windows.
+- The `lp_bin` / `lpstat_bin` / `lpoptions_bin` / `cancel_bin` overrides only apply to the CUPS backend.
+
+---
+
 ## 🧪 Testing
 
 Run the test suite using Python's standard `unittest`:
@@ -724,7 +757,7 @@ Run the test suite using Python's standard `unittest`:
 python3 -m unittest discover -s tests -v
 ```
 
-All 11 unit tests run with zero external test runner requirements.
+All unit tests run with zero external test runner requirements. The Windows backend tests mock `win32print`, so they run on any OS.
 
 ---
 

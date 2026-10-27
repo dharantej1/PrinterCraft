@@ -206,6 +206,91 @@ class PrintJobOptions:
 
         return args
 
+    def build_devmode_settings(self) -> Dict[str, Any]:
+        """
+        Translate options into Windows DEVMODE field values (used only by the
+        Win32 backend). Keys are pywin32 `PyDEVMODE` attribute names.
+        `raw_options`, `fit_to_page`, `scaling`, `number_up` and `page_ranges`
+        have no DEVMODE equivalent and are not included.
+        """
+        settings: Dict[str, Any] = {"Copies": min(max(1, self.copies), 999)}
+
+        if self.collate is not None:
+            settings["Collate"] = _DMCOLLATE_TRUE if self.collate else _DMCOLLATE_FALSE
+
+        if self.duplex is not None:
+            settings["Duplex"] = _WIN32_DUPLEX[self.duplex]
+
+        if self.color_mode is not None and self.color_mode != ColorMode.AUTO:
+            settings["Color"] = _WIN32_COLOR[self.color_mode]
+
+        if self.orientation is not None:
+            settings["Orientation"] = _WIN32_ORIENTATION[self.orientation]
+
+        if self.media:
+            paper_size = _WIN32_PAPER_SIZES.get(self.media.strip().lower())
+            if paper_size is not None:
+                settings["PaperSize"] = paper_size
+            else:
+                settings["FormName"] = self.media
+
+        return settings
+
+
+# Windows DEVMODE constants (wingdi.h)
+_DMCOLLATE_FALSE = 0
+_DMCOLLATE_TRUE = 1
+
+_WIN32_DUPLEX = {
+    DuplexMode.ONE_SIDED: 1,  # DMDUP_SIMPLEX
+    DuplexMode.TWO_SIDED_LONG_EDGE: 2,  # DMDUP_VERTICAL
+    DuplexMode.TWO_SIDED_SHORT_EDGE: 3,  # DMDUP_HORIZONTAL
+}
+
+_WIN32_COLOR = {
+    ColorMode.MONOCHROME: 1,  # DMCOLOR_MONOCHROME
+    ColorMode.COLOR: 2,  # DMCOLOR_COLOR
+}
+
+# DEVMODE only supports portrait/landscape; reverse variants map to their base orientation.
+_WIN32_ORIENTATION = {
+    Orientation.PORTRAIT: 1,  # DMORIENT_PORTRAIT
+    Orientation.REVERSE_PORTRAIT: 1,
+    Orientation.LANDSCAPE: 2,  # DMORIENT_LANDSCAPE
+    Orientation.REVERSE_LANDSCAPE: 2,
+}
+
+# CUPS/PWG media names -> DMPAPER_* values. Unknown names are passed as a form name.
+_WIN32_PAPER_SIZES = {
+    "letter": 1,
+    "na_letter_8.5x11in": 1,
+    "tabloid": 3,
+    "na_ledger_11x17in": 3,
+    "ledger": 4,
+    "legal": 5,
+    "na_legal_8.5x14in": 5,
+    "statement": 6,
+    "na_invoice_5.5x8.5in": 6,
+    "executive": 7,
+    "na_executive_7.25x10.5in": 7,
+    "a3": 8,
+    "iso_a3_297x420mm": 8,
+    "a4": 9,
+    "iso_a4_210x297mm": 9,
+    "a5": 11,
+    "iso_a5_148x210mm": 11,
+    "b4": 12,
+    "jis_b4_257x364mm": 12,
+    "b5": 13,
+    "jis_b5_182x257mm": 13,
+    "env10": 20,
+    "na_number-10_4.125x9.5in": 20,
+    "envdl": 27,
+    "iso_dl_110x220mm": 27,
+    "a6": 70,
+    "iso_a6_105x148mm": 70,
+}
+
 
 @dataclass
 class PrintResult:
