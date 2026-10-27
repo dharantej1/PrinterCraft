@@ -85,6 +85,9 @@ def opts(**kw):
 check("Win32Backend selected", isinstance(mgr.backend, Win32Backend))
 printers = {p.name: p for p in mgr.list_printers()}
 check("printer discovered", PRINTER in printers, ", ".join(printers))
+port = win32print.GetPrinter(win32print.OpenPrinter(PRINTER), 2)["pPortName"]
+print("DC_ENUMRESOLUTIONS:", repr(win32print.DeviceCapabilities(PRINTER, port, 13, None))[:200])
+print("DC_COPIES:", repr(win32print.DeviceCapabilities(PRINTER, port, 18, None)))
 options = mgr.get_printer_options(PRINTER)
 check("driver options read", "PageSize" in options, ", ".join(options))
 print("options:", {k: [c.name for c in v.choices][:6] for k, v in options.items()})

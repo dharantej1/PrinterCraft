@@ -176,6 +176,18 @@ def _parse_resolution(value: str) -> Tuple[int, int]:
     return x, int(match.group(2) or x)
 
 
+def _resolution_pair(value: Any) -> Tuple[int, int]:
+    """DC_ENUMRESOLUTIONS entries come back as (x, y) pairs or as dicts depending on pywin32."""
+    if isinstance(value, dict):
+        lowered = {str(k).lower(): v for k, v in value.items()}
+        x = next((lowered[k] for k in ("x", "xdpi", "xresolution", "cx") if k in lowered), None)
+        y = next((lowered[k] for k in ("y", "ydpi", "yresolution", "cy") if k in lowered), None)
+        if x is None or y is None:
+            x, y = list(value.values())[:2]
+        return int(x), int(y)
+    return int(value[0]), int(value[1])
+
+
 def _format_time(value: Any) -> str:
     if hasattr(value, "strftime"):
         try:
@@ -342,7 +354,10 @@ class Win32Backend(PrinterBackend):
         if resolutions:
             names = []
             for res in resolutions:
-                x, y = int(res[0]), int(res[1])
+                try:
+                    x, y = _resolution_pair(res)
+                except (TypeError, ValueError, IndexError):
+                    continue
                 name = f"{x}dpi" if x == y else f"{x}x{y}dpi"
                 if x > 0 and name not in names:
                     names.append(name)

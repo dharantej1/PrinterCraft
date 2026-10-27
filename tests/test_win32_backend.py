@@ -410,7 +410,7 @@ class TestWin32GdiSubmission(GdiTestCase):
         caps = {
             win32_backend.DC_MEDIATYPENAMES: ["Plain", "Glossy"],
             win32_backend.DC_MEDIATYPES: [1, 257],
-            win32_backend.DC_ENUMRESOLUTIONS: [(600, 600), (1200, 600)],
+            win32_backend.DC_ENUMRESOLUTIONS: [(600, 600), {"x": 1200, "y": 600}, "bogus"],
         }
         self.api.DeviceCapabilities.side_effect = lambda name, port, cap, dm=None: caps.get(cap)
         options = self.backend.get_printer_options("HP LaserJet")
