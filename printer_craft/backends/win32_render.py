@@ -150,7 +150,7 @@ def _require_pillow() -> None:
         import PIL  # noqa: F401
     except ImportError:
         raise DocumentConversionError(
-            "Pillow is required to print on Windows: pip install \"printer-craft[windows]\""
+            "Pillow is required to print on Windows: pip install Pillow"
         )
 
 
@@ -159,7 +159,7 @@ def _require_pdfium() -> Any:
         import pypdfium2
     except ImportError:
         raise DocumentConversionError(
-            "pypdfium2 is required to print PDFs on Windows: pip install \"printer-craft[windows]\""
+            "pypdfium2 is required to print PDFs on Windows: pip install pypdfium2"
         )
     return pypdfium2
 

@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg)](#-platform-support)
-[![Tests](https://github.com/dharantej1/PrinterCraft/actions/workflows/tests.yml/badge.svg)](https://github.com/dharantej1/PrinterCraft/actions/workflows/tests.yml)
+[![CI](https://github.com/dharantej1/PrinterCraft/actions/workflows/ci.yml/badge.svg)](https://github.com/dharantej1/PrinterCraft/actions/workflows/ci.yml)
 
 **printer-craft** is a Python library and CLI tool for discovering printers, querying hardware/driver options, and submitting print jobs on **macOS and Linux** (via CUPS) and on **Windows** (via the Windows print spooler). The same `printer-craft` commands, the same Python API and the same `PrintResult` work on every platform.
 
@@ -16,7 +16,7 @@ The macOS/Linux communication architecture was **reverse-engineered from the nat
 | | macOS | Linux / Unix | Windows 10 / 11 / Server |
 | :--- | :--- | :--- | :--- |
 | **Print system** | CUPS (`lp`, `lpstat`, `lpoptions`, `cancel`) | CUPS (`lp`, `lpstat`, `lpoptions`, `cancel`) | Windows print spooler (`win32print` / GDI via pywin32) |
-| **Install** | `pip install .` | `pip install .` (+ `cups-client`) | `pip install ".[windows]"` |
+| **Install** | `pip install printer-craft` | `pip install printer-craft` (+ `cups-client`) | `pip install printer-craft` |
 | **Printers supported** | Any CUPS queue | Any CUPS queue | Any installed Windows printer driver (local, network, shared, virtual such as *Microsoft Print to PDF*) |
 | **PDF** | Native | Native | Rendered with `pypdfium2` |
 | **Images** (`png`, `jpg`, `tiff`, `gif`, `bmp`, `heic`, `webp`) | `sips` | CUPS filters | `Pillow` (HEIC needs `pillow-heif`) |
@@ -51,7 +51,7 @@ The macOS/Linux communication architecture was **reverse-engineered from the nat
 - **Intelligent Page Imposition**: Automatically duplicates/rearranges PDF pages via native macOS `PDFKit` (JXA) when repeating pages, bypassing the CUPS `Bad page-ranges values` limitation. On Windows the same page sequences are laid out directly by printer-craft.
 - **Safe Dry-Run Mode**: Inspect the generated print command without sending jobs to physical hardware.
 - **Queue Management**: Inspect active print queues and cancel pending jobs.
-- **Zero Heavy Dependencies on macOS/Linux**: Pure Python using the standard library and operating system CUPS binaries. The Windows extra adds only pywin32, pypdfium2, Pillow and pypdf.
+- **Zero Heavy Dependencies on macOS/Linux**: Pure Python using the standard library and operating system CUPS binaries. On Windows, `pip install` automatically adds only pywin32, pypdfium2, Pillow and pypdf.
 
 ---
 
@@ -72,58 +72,50 @@ Full disassembly and instruction analysis is documented in [REVERSE_ENGINEERING.
 
 **Requirements (all platforms):** Python 3.9 or newer and `pip`.
 
-### 🍎 macOS
-
-CUPS and all conversion tools (`lp`, `lpstat`, `cupsfilter`, `textutil`, `sips`) ship with macOS — nothing else to install.
+The same command installs printer-craft on macOS, Linux and Windows:
 
 ```bash
-git clone https://github.com/dharantej1/PrinterCraft.git
-cd PrinterCraft
-pip install .
-
-# Optional: faster pure-Python page duplication/rearranging (otherwise PDFKit/JXA is used)
-pip install ".[extras]"
+pip install printer-craft
 ```
 
-### 🐧 Linux / Unix
-
-Install the CUPS client tools (and the CUPS server if this machine hosts the printers), then install printer-craft:
+To install the latest code straight from GitHub (works today on every OS, no clone needed):
 
 ```bash
-# Debian / Ubuntu
-sudo apt-get install cups-client          # add `cups` to run a local print server
-# Fedora / RHEL
-sudo dnf install cups-client
-# Arch
-sudo pacman -S cups
+pip install git+https://github.com/dharantej1/PrinterCraft.git
+```
 
-git clone https://github.com/dharantej1/PrinterCraft.git
-cd PrinterCraft
-pip install ".[extras]"                   # pypdf is used for repeated/re-ordered page sequences
+Or from a local clone: `git clone https://github.com/dharantej1/PrinterCraft.git && cd PrinterCraft && pip install .`
+
+pip installs only what your OS needs:
+
+| OS | What `pip install printer-craft` installs |
+| :--- | :--- |
+| macOS / Linux | printer-craft only. There are no third-party dependencies; it uses the system CUPS tools. |
+| Windows | printer-craft + `pywin32` (print spooler access), `pypdfium2` (PDF rendering), `Pillow` (images, text, drawing), `pypdf` (page selection for RAW PDF jobs). These are selected automatically through `sys_platform == 'win32'` markers. |
+
+### 🍎 macOS notes
+
+CUPS and all conversion tools (`lp`, `lpstat`, `cupsfilter`, `textutil`, `sips`) ship with macOS, so nothing else is needed.
+Optional: `pip install "printer-craft[extras]"` adds pypdf for faster pure-Python page duplication (otherwise PDFKit/JXA is used).
+
+### 🐧 Linux / Unix notes
+
+Install the CUPS client tools (and the CUPS server if this machine hosts the printers):
+
+```bash
+sudo apt-get install cups-client          # Debian / Ubuntu  (add `cups` for a local print server)
+sudo dnf install cups-client              # Fedora / RHEL
+sudo pacman -S cups                       # Arch
 ```
 
 Printers are managed with the usual CUPS tools (`lpadmin`, the web UI at <http://localhost:631>, or your desktop's printer settings).
+Optional: `pip install "printer-craft[extras]"` adds pypdf for repeated/re-ordered page sequences.
 
-### 🪟 Windows
+### 🪟 Windows notes
 
-Open **PowerShell** or **Command Prompt** and run:
+Run the install from **PowerShell** or **Command Prompt** (`py -m pip install printer-craft` if `pip` is not on `PATH`). Nothing else is required for PDFs, images and text files.
 
-```powershell
-git clone https://github.com/dharantej1/PrinterCraft.git
-cd PrinterCraft
-py -m pip install ".[windows]"
-```
-
-The `windows` extra installs (only on Windows — it is a no-op on macOS/Linux):
-
-| Package | Used for |
-| :--- | :--- |
-| `pywin32` | Windows print spooler access (`win32print`, `win32gui`) |
-| `pypdfium2` | Rendering PDF pages for the printer driver |
-| `Pillow` | Images, plain-text rendering and drawing on the printer device |
-| `pypdf` | Page selection for RAW (`-o raw`) PDF jobs |
-
-Optional extras on Windows:
+Optional:
 
 - **Office documents** (`.docx`, `.doc`, `.rtf`, `.odt`, `.xlsx`, `.pptx`, `.html`, ...): install [LibreOffice](https://www.libreoffice.org/download/) (detected on `PATH` or in `C:\Program Files\LibreOffice`), **or** `py -m pip install docx2pdf` to convert Word files with an installed Microsoft Word.
 - **HEIC/HEIF photos**: `py -m pip install pillow-heif`.
@@ -133,7 +125,7 @@ Optional extras on Windows:
 ### Editable Development Mode (any platform)
 
 ```bash
-pip install -e ".[dev,extras]"            # add ,windows on Windows
+pip install -e ".[dev,extras]"
 ```
 
 ### Verify the installation
@@ -924,7 +916,7 @@ Windows drivers do not use PPD files, so `-o` values are interpreted as follows 
 
 | Symptom | Fix |
 | :--- | :--- |
-| `pywin32 is required for printing on Windows` | `py -m pip install ".[windows]"` (or `pip install pywin32`) |
+| `pywin32 is required for printing on Windows` | Reinstall printer-craft (`py -m pip install --force-reinstall printer-craft`) or `py -m pip install pywin32` |
 | `pypdfium2 is required to print PDFs on Windows` | `py -m pip install pypdfium2` |
 | `Cannot convert report.docx to PDF on Windows` | Install LibreOffice, or `pip install docx2pdf` with Microsoft Word installed |
 | `printer-craft` is not recognized | Add the Python `Scripts` folder to `PATH`, or use `py -m printer_craft.cli` |
@@ -951,7 +943,7 @@ py -m unittest tests.test_models tests.test_backends tests.test_win32_backend te
 
 The Windows backend tests mock `win32print`, so they also run on macOS and Linux (install `pypdf Pillow pypdfium2` to run the rendering tests too).
 
-[CI](.github/workflows/tests.yml) runs the suite on Ubuntu, macOS and Windows for every pull request. On Windows it also runs an end-to-end smoke test ([`.github/scripts/windows_smoke.py`](.github/scripts/windows_smoke.py)) against the real print spooler. That test covers discovery, driver options, PDF/image/text/bytes printing, page ranges, repeat, N-up, media, orientation, copies, RAW, dry run, queue listing/cancel/purge, and the CLI, and checks the printed output.
+A single workflow, [`ci.yml`](.github/workflows/ci.yml), runs the suite on Ubuntu, macOS and Windows for every pull request and push to `main`. For `v*` tags it runs the same tests, then builds the wheel and sdist and publishes the GitHub Release. Publishing to PyPI happens too once the repository variable `PUBLISH_TO_PYPI=true` is set and a PyPI trusted publisher is configured. On Windows it also runs an end-to-end smoke test ([`.github/scripts/windows_smoke.py`](.github/scripts/windows_smoke.py)) against the real print spooler. That test covers discovery, driver options, PDF/image/text/bytes printing, page ranges, repeat, N-up, media, orientation, copies, RAW, dry run, queue listing/cancel/purge, and the CLI, and checks the printed output.
 
 ---
 

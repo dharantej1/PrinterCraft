@@ -11,7 +11,7 @@
 pypdf>=3.17.0
 Pillow>=10.2.0
 
-# Windows print spooler backend (installed only on Windows):
+# Windows print spooler backend (installed automatically by `pip install printer-craft` on Windows only):
 pywin32>=306; sys_platform == "win32"
 pypdfium2>=4.25.0; sys_platform == "win32"
 

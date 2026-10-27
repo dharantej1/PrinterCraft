@@ -29,7 +29,14 @@ classifiers = [
 ]
 keywords = ["cups", "printing", "printer", "pdf", "macos", "reverse-engineering", "lp", "lpoptions", "windows", "win32print"]
 requires-python = ">=3.9"
-dependencies = []
+# macOS/Linux: no third-party dependencies (CUPS binaries are used).
+# Windows: the print spooler backend's dependencies are installed automatically.
+dependencies = [
+    "pywin32>=306; sys_platform == 'win32'",
+    "pypdfium2>=4.25.0; sys_platform == 'win32'",
+    "Pillow>=10.2.0; sys_platform == 'win32'",
+    "pypdf>=3.17.0; sys_platform == 'win32'",
+]
 
 [tool.setuptools.packages.find]
 include = ["printer_craft*"]
@@ -49,12 +56,6 @@ dev = [
 extras = [
     "pypdf>=3.17.0",
     "Pillow>=10.2.0",
-]
-windows = [
-    "pywin32>=306; sys_platform == 'win32'",
-    "pypdf>=3.17.0; sys_platform == 'win32'",
-    "Pillow>=10.2.0; sys_platform == 'win32'",
-    "pypdfium2>=4.25.0; sys_platform == 'win32'",
 ]
 
 [project.scripts]

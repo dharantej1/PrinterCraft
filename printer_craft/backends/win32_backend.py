@@ -204,7 +204,7 @@ class Win32Backend(PrinterBackend):
         if win32print is None:
             raise SpoolerUnavailableError(
                 "pywin32 is required for printing on Windows. "
-                "Install it with: pip install \"printer-craft[windows]\""
+                "Reinstall printer-craft (pip install --force-reinstall printer-craft) or run: pip install pywin32"
             )
         return win32print
 
@@ -384,7 +384,7 @@ class Win32Backend(PrinterBackend):
         if win32gui is None:
             raise SpoolerUnavailableError(
                 "pywin32 is required for printing on Windows. "
-                "Install it with: pip install \"printer-craft[windows]\""
+                "Reinstall printer-craft (pip install --force-reinstall printer-craft) or run: pip install pywin32"
             )
         return win32gui
 
