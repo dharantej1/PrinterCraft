@@ -128,10 +128,6 @@ pdf_pages("text file", lambda: mgr.print_document(txt, options=opts()), 2)
 
 pdf_pages("print_bytes pdf", lambda: mgr.print_bytes(three.read_bytes(), title="bytes", options=opts()), 3)
 
-raw_payload = b"%!PS-Adobe-3.0\n%% printer_craft raw smoke test\nshowpage\n"
-data, _ = run_job("RAW bytes", lambda: mgr.print_bytes(raw_payload, title="raw", options=opts()))
-check("RAW bytes: written unchanged", data == raw_payload)
-
 dry = mgr.print_document(three, options=opts(copies=2, number_up=2, dry_run=True))
 check("dry run", dry.success and dry.dry_run and "number-up=2" in dry.command_run, " ".join(dry.command_run))
 
@@ -139,6 +135,16 @@ check("dry run", dry.success and dry.dry_run and "number-up=2" in dry.command_ru
 handle = win32print.OpenPrinter(PRINTER, {"DesiredAccess": win32print.PRINTER_ALL_ACCESS})
 win32print.SetPrinter(handle, 0, None, win32print.PRINTER_CONTROL_PAUSE)
 try:
+    # "Microsoft Print To PDF" is a v4 (XPS) driver that cannot print RAW data, so verify the
+    # RAW spool path by checking the queued job carries exactly the submitted bytes.
+    raw_payload = b"%!PS-Adobe-3.0\n%% printer_craft raw smoke test\nshowpage\n"
+    raw = mgr.print_bytes(raw_payload, title="raw", options=opts())
+    check("RAW bytes: submitted", raw.success and "datatype=RAW" in raw.command_run, raw.error or raw.job_id)
+    raw_job = [j for j in mgr.get_jobs(PRINTER) if j["job_id"] == raw.job_id]
+    check("RAW bytes: queued with exact size", bool(raw_job) and raw_job[0]["size_bytes"] == str(len(raw_payload)),
+          str(raw_job))
+    check("RAW bytes: cancel", mgr.cancel_job(raw.job_id))
+
     queued = mgr.print_document(one, options=opts(title="queued"))
     jobs = mgr.get_jobs(PRINTER)
     check("jobs listed", any(j["job_id"] == queued.job_id for j in jobs), str(jobs))

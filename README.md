@@ -2,19 +2,41 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
-[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg)](https://www.cups.org/)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg)](#-platform-support)
+[![Tests](https://github.com/dharantej1/PrinterCraft/actions/workflows/tests.yml/badge.svg)](https://github.com/dharantej1/PrinterCraft/actions/workflows/tests.yml)
 
-**printer-craft** is a Python library and CLI tool for discovering printers, querying hardware PPD options, and submitting print jobs on macOS and Unix systems (via CUPS) and on Windows (via the Windows print spooler).
+**printer-craft** is a Python library and CLI tool for discovering printers, querying hardware/driver options, and submitting print jobs on **macOS and Linux** (via CUPS) and on **Windows** (via the Windows print spooler). The same `printer-craft` commands, the same Python API and the same `PrintResult` work on every platform.
 
-The core communication architecture was **reverse-engineered from the native macOS desktop application `PdfCraft.app`**, extracting its exact CUPS subprocess pipeline, environment handling, PPD parser, and argument builder.
+The macOS/Linux communication architecture was **reverse-engineered from the native macOS desktop application `PdfCraft.app`**, extracting its exact CUPS subprocess pipeline, environment handling, PPD parser, and argument builder.
+
+---
+
+## 🧭 Platform Support
+
+| | macOS | Linux / Unix | Windows 10 / 11 / Server |
+| :--- | :--- | :--- | :--- |
+| **Print system** | CUPS (`lp`, `lpstat`, `lpoptions`, `cancel`) | CUPS (`lp`, `lpstat`, `lpoptions`, `cancel`) | Windows print spooler (`win32print` / GDI via pywin32) |
+| **Install** | `pip install .` | `pip install .` (+ `cups-client`) | `pip install ".[windows]"` |
+| **Printers supported** | Any CUPS queue | Any CUPS queue | Any installed Windows printer driver (local, network, shared, virtual such as *Microsoft Print to PDF*) |
+| **PDF** | Native | Native | Rendered with `pypdfium2` |
+| **Images** (`png`, `jpg`, `tiff`, `gif`, `bmp`, `heic`, `webp`) | `sips` | CUPS filters | `Pillow` (HEIC needs `pillow-heif`) |
+| **Text / source code** | `cupsfilter` | CUPS filters | Built-in monospace renderer (`Pillow`) |
+| **Office** (`docx`, `doc`, `rtf`, `odt`, `html`, `xlsx`, `pptx`, ...) | `textutil` + `cupsfilter` | CUPS filters | LibreOffice (`soffice`) or `docx2pdf` + Microsoft Word |
+| **PostScript / PCL / PRN** | Native | Native | Sent unchanged (RAW) |
+| **Every option in the [parameter reference](#-complete-cli--api-parameters-reference)** | ✅ | ✅ | ✅ (see [how options map on Windows](#how-each-option-is-applied-on-windows)) |
+| **Queue listing / cancel / purge** | ✅ | ✅ | ✅ |
+| **Dry-run** | ✅ | ✅ | ✅ |
+
+`PrinterManager` picks the backend automatically: `sys.platform == "win32"` → Windows backend, anything else → CUPS backend. On macOS and Linux the behaviour, commands and output are exactly the same as before Windows support was added.
 
 ---
 
 ## 🌟 Key Features
 
 - **Reverse-Engineered CUPS Architecture**: Implements the identical printing pipeline found in native macOS desktop software (`craft_print`).
-- **Universal Document Support**: Prints **PDFs**, **Images** (`.png`, `.jpg`, `.tiff`, `.heic`), **Office docs** (`.docx`, `.rtf`, `.odt`), and **Source code / text** (`.txt`, `.py`, `.md`, `.log`) with automatic format conversion using native macOS utilities (`cupsfilter`, `textutil`, `sips`).
-- **Passable Printing Options**:
+- **Native Windows Backend**: Uses the Windows print spooler directly through pywin32 — no Adobe Reader, no shell `print` verbs, no pop-up dialogs. Documents are rendered onto the printer's device context, so *any* Windows printer driver works.
+- **Universal Document Support**: Prints **PDFs**, **Images** (`.png`, `.jpg`, `.tiff`, `.heic`), **Office docs** (`.docx`, `.rtf`, `.odt`), and **Source code / text** (`.txt`, `.py`, `.md`, `.log`) with automatic format conversion (native macOS utilities `cupsfilter`, `textutil`, `sips`; `pypdfium2`, `Pillow` and LibreOffice on Windows).
+- **Passable Printing Options** (all platforms):
   - Copies (`-n 1..999`)
   - Duplex (`one-sided`, `two-sided-long-edge`, `two-sided-short-edge`)
   - Collation (`--collate` / `--no-collate`)
@@ -25,11 +47,11 @@ The core communication architecture was **reverse-engineered from the native mac
   - Orientation (`portrait`, `landscape`, `reverse-landscape`, `reverse-portrait`)
   - N-Up printing (`1`, `2`, `4`, `6`, `9`, `16` pages per sheet)
   - Scaling & fit-to-page (`auto-fit`, `fit-to-page`, `fill`)
-  - Custom hardware PPD keys (`-o InputSlot=Manual`, `-o pjlDensity=3`)
-- **Intelligent Page Imposition**: Automatically duplicates/rearranges PDF pages via native macOS `PDFKit` (JXA) when repeating pages, bypassing the CUPS `Bad page-ranges values` limitation.
-- **Safe Dry-Run Mode**: Inspect generated CUPS commands without sending jobs to physical hardware.
+  - Custom hardware keys (`-o InputSlot=Manual`, `-o Resolution=600dpi`, `-o pjlDensity=3`)
+- **Intelligent Page Imposition**: Automatically duplicates/rearranges PDF pages via native macOS `PDFKit` (JXA) when repeating pages, bypassing the CUPS `Bad page-ranges values` limitation. On Windows the same page sequences are laid out directly by printer-craft.
+- **Safe Dry-Run Mode**: Inspect the generated print command without sending jobs to physical hardware.
 - **Queue Management**: Inspect active print queues and cancel pending jobs.
-- **Zero Heavy Dependencies**: Pure Python using standard library and operating system CUPS binaries.
+- **Zero Heavy Dependencies on macOS/Linux**: Pure Python using the standard library and operating system CUPS binaries. The Windows extra adds only pywin32, pypdfium2, Pillow and pypdf.
 
 ---
 
@@ -48,24 +70,78 @@ Full disassembly and instruction analysis is documented in [REVERSE_ENGINEERING.
 
 ## 🚀 Installation
 
-### From Source
+**Requirements (all platforms):** Python 3.9 or newer and `pip`.
+
+### 🍎 macOS
+
+CUPS and all conversion tools (`lp`, `lpstat`, `cupsfilter`, `textutil`, `sips`) ship with macOS — nothing else to install.
+
 ```bash
 git clone https://github.com/dharantej1/PrinterCraft.git
 cd PrinterCraft
 pip install .
+
+# Optional: faster pure-Python page duplication/rearranging (otherwise PDFKit/JXA is used)
+pip install ".[extras]"
 ```
 
-### Editable Development Mode
+### 🐧 Linux / Unix
+
+Install the CUPS client tools (and the CUPS server if this machine hosts the printers), then install printer-craft:
+
 ```bash
-pip install -e .
+# Debian / Ubuntu
+sudo apt-get install cups-client          # add `cups` to run a local print server
+# Fedora / RHEL
+sudo dnf install cups-client
+# Arch
+sudo pacman -S cups
+
+git clone https://github.com/dharantej1/PrinterCraft.git
+cd PrinterCraft
+pip install ".[extras]"                   # pypdf is used for repeated/re-ordered page sequences
 ```
 
-### Windows
-```bash
-pip install ".[windows]"
+Printers are managed with the usual CUPS tools (`lpadmin`, the web UI at <http://localhost:631>, or your desktop's printer settings).
+
+### 🪟 Windows
+
+Open **PowerShell** or **Command Prompt** and run:
+
+```powershell
+git clone https://github.com/dharantej1/PrinterCraft.git
+cd PrinterCraft
+py -m pip install ".[windows]"
 ```
-The `windows` extra installs `pywin32` (plus `pypdf` and `Pillow` for document
-conversion) and is a no-op on macOS/Linux. See [Windows Support](#-windows-support).
+
+The `windows` extra installs (only on Windows — it is a no-op on macOS/Linux):
+
+| Package | Used for |
+| :--- | :--- |
+| `pywin32` | Windows print spooler access (`win32print`, `win32gui`) |
+| `pypdfium2` | Rendering PDF pages for the printer driver |
+| `Pillow` | Images, plain-text rendering and drawing on the printer device |
+| `pypdf` | Page selection for RAW (`-o raw`) PDF jobs |
+
+Optional extras on Windows:
+
+- **Office documents** (`.docx`, `.doc`, `.rtf`, `.odt`, `.xlsx`, `.pptx`, `.html`, ...): install [LibreOffice](https://www.libreoffice.org/download/) (detected on `PATH` or in `C:\Program Files\LibreOffice`), **or** `py -m pip install docx2pdf` to convert Word files with an installed Microsoft Word.
+- **HEIC/HEIF photos**: `py -m pip install pillow-heif`.
+
+> If `pip install` puts `printer-craft.exe` in a Scripts folder that is not on `PATH`, either add it (pip prints the folder) or run the CLI as `py -m printer_craft.cli ...`.
+
+### Editable Development Mode (any platform)
+
+```bash
+pip install -e ".[dev,extras]"            # add ,windows on Windows
+```
+
+### Verify the installation
+
+```bash
+printer-craft list                        # shows installed printers and the default one
+printer-craft print some.pdf --dry-run    # shows what would be sent, without printing
+```
 
 ---
 
@@ -158,14 +234,71 @@ printer-craft cancel HP_LaserJet_Professional_M1136_MFP-104
 printer-craft cancel HP_LaserJet_Professional_M1136_MFP --all
 ```
 
+### 5. Using the CLI on Windows
+
+Every command and flag above works the same on Windows. A few practical notes:
+
+- Windows printer names often contain spaces — quote them: `-d "HP LaserJet Pro M404"`. `printer-craft list` shows the exact names.
+- PowerShell uses a backtick (`` ` ``) for line continuation instead of `\`; in Command Prompt use `^`.
+- Job IDs have the same `<printer>-<id>` shape as on CUPS, e.g. `"HP LaserJet Pro M404-17"`.
+- `printer-craft options` lists what the *driver* reports: `PageSize`, `InputSlot` (trays), `MediaType`, `Resolution`, `Duplex`, `ColorModel`, `Collate`, `Orientation`. Those names can be passed back with `-o`.
+
+```powershell
+# List printers and the default one
+printer-craft list
+
+# Driver capabilities (trays, paper sizes, resolutions, ...)
+printer-craft options "HP LaserJet Pro M404"
+
+# 2 copies, duplex, grayscale, A4, from the manual feed tray at 600 dpi
+printer-craft print report.pdf -d "HP LaserJet Pro M404" `
+  -n 2 --duplex two-sided-long-edge --color monochrome --media A4 `
+  -o InputSlot="Manual Feed" -o Resolution=600dpi
+
+# 4 copies of a one-page form, two per side
+printer-craft print ApplicationForm.pdf --repeat 4 -N 2 --duplex two-sided-short-edge
+
+# Images, text files and Word documents
+printer-craft print photo.jpg --media A4 --orientation landscape
+printer-craft print app.log -N 2
+printer-craft print contract.docx            # needs LibreOffice or docx2pdf + Word
+
+# Print to a PDF file with the built-in "Microsoft Print to PDF" printer (it asks for a file name)
+printer-craft print slides.pdf -d "Microsoft Print to PDF" -N 4
+
+# Send a PostScript/PCL file (or any file with -o raw) to the printer unchanged
+printer-craft print label.prn -d "Zebra ZD420"
+printer-craft print document.pdf -d "PDF Direct Printer" -o raw
+
+# Preview without printing
+printer-craft print report.pdf -n 3 -N 2 --dry-run
+
+# Queue
+printer-craft jobs
+printer-craft cancel "HP LaserJet Pro M404-17"
+printer-craft cancel "HP LaserJet Pro M404" --all
+```
+
+A Windows dry run prints a descriptive command instead of an `lp` command line, e.g.:
+
+```text
+=== DRY RUN MODE ===
+Target Printer: HP LaserJet Pro M404
+Command:
+  win32print -d HP LaserJet Pro M404 -t report.pdf -o render=gdi -o Copies=3 -o scaling=fit -o number-up=2 C:\Users\me\report.pdf
+Job was not sent to hardware.
+```
+
 ---
 
 ## 🐍 Python API Usage
 
 ### 1. Setup — `PrinterManager`
 
-`PrinterManager` is the main entry point. It auto-discovers CUPS binaries but
-allows you to override them for custom CUPS installations.
+`PrinterManager` is the main entry point and works the same on every platform.
+On macOS/Linux it auto-discovers the CUPS binaries and lets you override them for
+custom CUPS installations; on Windows it talks to the print spooler (the binary
+overrides are accepted and ignored there).
 
 ```python
 from printer_craft import PrinterManager
@@ -173,7 +306,10 @@ from printer_craft import PrinterManager
 # Default: auto-discovers lp, lpstat, lpoptions, cancel from PATH / /usr/bin
 mgr = PrinterManager()
 
-# Override individual binaries (e.g. custom CUPS install)
+# Which backend is in use? (CUPSBackend on macOS/Linux, Win32Backend on Windows)
+print(type(mgr.backend).__name__)
+
+# Override individual binaries (e.g. custom CUPS install; macOS/Linux only)
 mgr = PrinterManager(
     lp_bin="/opt/cups/bin/lp",
     lpstat_bin="/opt/cups/bin/lpstat",
@@ -362,7 +498,9 @@ options = PrintJobOptions(
 
 Accepts any supported file type (`.pdf`, `.docx`, `.rtf`, `.odt`, `.png`,
 `.jpg`, `.tiff`, `.heic`, `.txt`, `.py`, `.md`). Non-PDF formats are
-auto-converted using native macOS tools (`textutil`, `sips`, `cupsfilter`).
+auto-converted using native macOS tools (`textutil`, `sips`, `cupsfilter`). On
+Windows, PDFs, images and text are rendered directly and Office files are converted
+with LibreOffice or docx2pdf — the examples below work unchanged.
 
 ```python
 from printer_craft import (
@@ -475,7 +613,9 @@ print("Would run:", " ".join(result.command_run))
 #### `print_bytes(data, title, options=None)` → `PrintResult`
 
 Streams a bytes object (PDF or PostScript) directly to `/usr/bin/lp` stdin,
-identical to `PdfCraft::craft_print::submit_with_progress`.
+identical to `PdfCraft::craft_print::submit_with_progress`. On Windows, PDF and
+image bytes are rendered for the printer driver and any other data (PostScript,
+PCL, ...) is spooled unchanged with the RAW datatype.
 
 ```python
 from printer_craft import PrinterManager, PrintJobOptions, DuplexMode, ColorMode
@@ -586,11 +726,13 @@ except PrinterNotFoundError as e:
     print(f"Printer not found: {e}")
 
 except SpoolerUnavailableError as e:
-    # Raised when the CUPS daemon is not running or unreachable
+    # Raised when the CUPS daemon is not running or unreachable,
+    # or on Windows when the spooler is unavailable / pywin32 is missing
     print(f"CUPS spooler is down: {e}")
 
 except DocumentConversionError as e:
     # Raised when textutil / sips / cupsfilter conversion fails
+    # (Windows: missing pypdfium2/Pillow/LibreOffice, unreadable file, empty page selection)
     print(f"Could not convert document: {e}")
 
 except PrintExecutionError as e:
@@ -664,7 +806,9 @@ result.success      # bool   — True if job submitted (or dry-run)
 result.printer      # str    — resolved target printer name
 result.job_id       # Optional[str]  — e.g. "HP_LaserJet-104"  (None on dry-run)
 result.command_run  # List[str]      — exact argv passed to /usr/bin/lp
+                    #                  (Windows: equivalent "win32print -d ... -o ..." description)
 result.output       # str    — raw stdout from lp
+                    #          (Windows: "request id is <printer>-<id> (1 file(s))")
 result.error        # Optional[str]  — error message if success=False
 result.dry_run      # bool   — True when options.dry_run was set
 ```
@@ -674,6 +818,8 @@ result.dry_run      # bool   — True when options.dry_run was set
 ## 📋 Complete CLI & API Parameters Reference
 
 ### 1. `printer-craft print` Parameters
+
+The *CUPS Flag Generated* column describes macOS/Linux. Every parameter is also supported on Windows — see [How each option is applied on Windows](#how-each-option-is-applied-on-windows).
 
 | Parameter / Flag | Python Type | Default Value | Allowed Values | CUPS Flag Generated | Description |
 | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -723,41 +869,89 @@ result.dry_run      # bool   — True when options.dry_run was set
 
 ---
 
-## 🪟 Windows Support
+## 🪟 Windows Details
 
-On Windows (`sys.platform == "win32"`), `PrinterManager` dispatches to
-`printer_craft.backends.Win32Backend` instead of the CUPS backend. The public API
-and `PrintResult` shape are the same; on macOS/Linux nothing changes.
+### How printing works on Windows
+
+`PrinterManager()` on Windows uses `printer_craft.backends.Win32Backend`. The public API, CLI and `PrintResult` fields are identical to macOS/Linux.
 
 | Operation | Windows implementation |
-| --- | --- |
-| Discovery | `win32print.EnumPrinters` / `GetDefaultPrinter` |
-| Driver options | `DeviceCapabilities` (paper sizes, trays, duplex, color, collate) with defaults from the printer `DEVMODE` |
-| Printing | `StartDocPrinter` / `WritePrinter` with the `RAW` datatype; options applied via `DocumentProperties` on the job `DEVMODE` |
-| Queue | `EnumJobs` / `SetJob(JOB_CONTROL_CANCEL)`; job ids look like `<printer>-<id>` |
-| Conversion | `pypdf` (page ranges/repetition), `Pillow` (images), LibreOffice `soffice --convert-to pdf` or `docx2pdf` (Office docs) |
+| :--- | :--- |
+| Discovery | `win32print.EnumPrinters` (local + network connections) and `GetDefaultPrinter` |
+| Driver options | `DeviceCapabilities` (paper sizes, trays, media types, resolutions, duplex, color, collate) with defaults from the printer `DEVMODE` |
+| Job settings | Applied to a `DEVMODE` and validated by the driver with `DocumentProperties` |
+| Printing documents | Pages are rendered (PDF → `pypdfium2`, images/text → `Pillow`, Office → LibreOffice/docx2pdf → PDF) and drawn on a printer device context (`CreateDC` / `StartDoc` / `StartPage` / `EndPage` / `EndDoc`). Works with every Windows printer driver. |
+| Printing printer-language data | `.ps`, `.eps`, `.pcl`, `.pxl`, `.prn`, `.raw` files, non-PDF/non-image `print_bytes` data, and any job with `-o raw` are spooled unchanged with `StartDocPrinter` / `WritePrinter` and the `RAW` datatype |
+| Queue | `EnumJobs`; cancel with `SetJob(JOB_CONTROL_CANCEL)`; job ids are `<printer>-<id>` |
 
-Notes and limitations:
-- `RAW` spooling sends the document bytes unchanged, so the printer must understand
-  the format (PDF-direct or PostScript printers). Images and Office documents are converted to PDF first.
-- Supported options: copies, collate, duplex, color mode, orientation (reverse variants map to
-  portrait/landscape) and media (common CUPS/PWG names such as `A4`, `Letter`,
-  `iso_a4_210x297mm`; other values are used as a Windows form name).
-  Page ranges are applied by rewriting the PDF with `pypdf`; open-ended ranges like `3-` are not supported.
-- `raw_options`, `fit_to_page`, `scaling` and `number_up` are CUPS-only and ignored on Windows.
-- The `lp_bin` / `lpstat_bin` / `lpoptions_bin` / `cancel_bin` overrides only apply to the CUPS backend.
+### How each option is applied on Windows
+
+| Option | macOS / Linux (CUPS) | Windows |
+| :--- | :--- | :--- |
+| `-d, --printer` | `lp -d` | Target printer name (`printer-craft list`) |
+| `-n, --copies` | `lp -n` | `DEVMODE.Copies`; if the driver cannot make copies itself (`DC_COPIES`), printer-craft prints the copies itself |
+| `-t, --title` | `lp -t` | Spooler document name |
+| `--collate` / `--no-collate` | `-o collate=` | `DEVMODE.Collate` (also honoured for software copies) |
+| `--duplex` | `-o sides=` | `DEVMODE.Duplex` (simplex / vertical / horizontal). With software copies, each collated copy starts on a new sheet |
+| `--color` | `-o print-color-mode=` | `DEVMODE.Color`; `monochrome` also renders pages in grayscale so color is never used |
+| `-m, --media` | `-o media=` | `DEVMODE.PaperSize` for common names (`Letter`, `Legal`, `A3`, `A4`, `A5`, `A6`, `B4`, `B5`, `Executive`, `Tabloid`, `Ledger`, `Statement`, `Env10`, `EnvDL`, and their PWG names like `iso_a4_210x297mm`); any other value is used as a Windows form name (e.g. `"Photo 4x6"`) |
+| `-p, --pages` | `-o page-ranges=` | Applied by printer-craft; supports `1-5`, `2,4,7`, `3-`, `-2` and repeated/re-ordered lists like `1,1,1,1` exactly like the CUPS path |
+| `--orientation` | `-o orientation-requested=` | `DEVMODE.Orientation`; `reverse-*` additionally rotates the page 180° |
+| `--fit-to-page` / `--no-fit-to-page` | `-o fit-to-page=` | Pages are scaled to the printable area (default) or printed at 100% centered on the sheet |
+| `--scaling` | `-o print-scaling=` | `fit-to-page` (fit), `fill` (fill and crop), `none` (actual size), `auto` / `auto-fit` (shrink only if too large) — takes precedence over `--fit-to-page`, like CUPS |
+| `-N, --number-up` | `-o number-up=` | Pages laid out in a grid (1×2, 2×2, 2×3, 3×3, 4×4), auto-rotated to fill each cell |
+| `-R, --repeat` | Pre-spool PDF synthesis | Same semantics (repeats page 1 N times), applied by printer-craft |
+| `-o KEY=VALUE` | `-o KEY=VALUE` | See below |
+| `--force-pdf` | Pre-convert to PDF | Accepted; documents are always rendered on Windows. With `-o raw`, converts non-PDF input to PDF before sending |
+| `--dry-run` | Shows the `lp` command | Shows the equivalent `win32print ...` description |
+
+### `-o KEY=VALUE` on Windows
+
+Windows drivers do not use PPD files, so `-o` values are interpreted as follows (keys are case-insensitive):
+
+| Key | Example | Effect |
+| :--- | :--- | :--- |
+| Standard CUPS/IPP keys | `-o sides=two-sided-long-edge`, `-o number-up=4`, `-o media=A4`, `-o print-color-mode=monochrome`, `-o collate=false`, `-o orientation-requested=4`, `-o landscape`, `-o fit-to-page=false`, `-o print-scaling=fill`, `-o page-ranges=1-3`, `-o copies=2` | Same meaning as on CUPS |
+| `InputSlot` | `-o InputSlot="Tray 2"` | Paper tray, by name from `printer-craft options` (or numeric bin id) |
+| `MediaType` | `-o MediaType=Glossy` | Media type, by name from `printer-craft options` (or numeric id) |
+| `Resolution` | `-o Resolution=600dpi`, `-o Resolution=1200x600dpi` | `DEVMODE.PrintQuality` / `YResolution` |
+| `PageSize`, `Duplex`, `ColorModel`, `Collate`, `Orientation` | `-o Duplex=DuplexTumble`, `-o ColorModel=Gray` | Same values as listed by `printer-craft options` |
+| Raw `DEVMODE` fields | `-o PrintQuality=300`, `-o DefaultSource=7`, `-o Scale=90`, `-o DitherType=2`, `-o PaperWidth=1000 -o PaperLength=1500` (tenths of mm) | Written directly to the `DEVMODE` |
+| `raw` | `-o raw` | Send the file to the printer unchanged (RAW datatype), like `lp -o raw` |
+| Anything else | `-o pjlDensity=3` | Logged as a warning and ignored (CUPS-only PPD option) |
+
+### Windows troubleshooting
+
+| Symptom | Fix |
+| :--- | :--- |
+| `pywin32 is required for printing on Windows` | `py -m pip install ".[windows]"` (or `pip install pywin32`) |
+| `pypdfium2 is required to print PDFs on Windows` | `py -m pip install pypdfium2` |
+| `Cannot convert report.docx to PDF on Windows` | Install LibreOffice, or `pip install docx2pdf` with Microsoft Word installed |
+| `printer-craft` is not recognized | Add the Python `Scripts` folder to `PATH`, or use `py -m printer_craft.cli` |
+| RAW job (`.ps`/`.pcl`/`.prn` or `-o raw`) stays in the queue with an error | RAW data bypasses the driver, so the printer must understand that language, and the driver must accept RAW jobs. Modern "v4"/class drivers (e.g. *Microsoft Print to PDF*, *Microsoft IPP Class Driver*) reject RAW — print the document normally (without `-o raw`) or use the manufacturer's PCL/PostScript driver |
+| `Microsoft Print to PDF` asks where to save | That printer always prompts for a file name; use a real printer, or a printer whose port is a file path |
+| A setting (duplex, tray, color) has no effect | The driver does not support it — check `printer-craft options "<printer>"`; settings the driver rejects are dropped by `DocumentProperties` |
+| Job stuck in the queue | `printer-craft jobs` then `printer-craft cancel "<printer>-<id>"` or `printer-craft cancel "<printer>" --all` |
 
 ---
 
 ## 🧪 Testing
 
-Run the test suite using Python's standard `unittest`:
+Run the test suite with Python's standard `unittest` (no external test runner needed):
 
 ```bash
+# macOS / Linux
 python3 -m unittest discover -s tests -v
 ```
 
-All unit tests run with zero external test runner requirements. The Windows backend tests mock `win32print`, so they run on any OS.
+```powershell
+# Windows (the CUPS-specific tests in test_core/test_parser/test_cli assume a CUPS backend)
+py -m unittest tests.test_models tests.test_backends tests.test_win32_backend tests.test_win32_render -v
+```
+
+The Windows backend tests mock `win32print`, so they also run on macOS and Linux (install `pypdf Pillow pypdfium2` to run the rendering tests too).
+
+[CI](.github/workflows/tests.yml) runs the suite on Ubuntu, macOS and Windows for every pull request. On Windows it also runs an end-to-end smoke test ([`.github/scripts/windows_smoke.py`](.github/scripts/windows_smoke.py)) against the real print spooler. That test covers discovery, driver options, PDF/image/text/bytes printing, page ranges, repeat, N-up, media, orientation, copies, RAW, dry run, queue listing/cancel/purge, and the CLI, and checks the printed output.
 
 ---
 

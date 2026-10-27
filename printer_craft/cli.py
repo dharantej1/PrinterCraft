@@ -19,7 +19,7 @@ from .models import ColorMode, DuplexMode, Orientation, PrintJobOptions, PrintSc
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="printer-craft",
-        description="Universal CLI printing tool for macOS/Linux (reverse-engineered from PdfCraft.app)",
+        description="Universal CLI printing tool for macOS, Linux and Windows (reverse-engineered from PdfCraft.app)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
