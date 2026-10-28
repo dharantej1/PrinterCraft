@@ -1,38 +1,57 @@
 """
-Core CUPS printer management and job submission engine, reverse-engineered
-from macOS PdfCraft.app architecture.
+Core printer management API, reverse-engineered from macOS PdfCraft.app architecture.
+`PrinterManager` dispatches to a platform backend: CUPS on macOS/Unix, win32print on Windows.
 """
 
 from __future__ import annotations
 
-import os
-import re
-import shutil
-import subprocess
+import dataclasses
+import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
-from .converter import DocumentConverter
-from .exceptions import (
-    DocumentConversionError,
-    PrinterNotFoundError,
-    PrintExecutionError,
-    SpoolerUnavailableError,
-)
+from .backends.base import PrinterBackend
+from .backends.cups_backend import CUPSBackend
+from .backends.win32_backend import Win32Backend
+from .exceptions import PrinterNotFoundError
 from .models import (
     PrintJobOptions,
     PrintResult,
     Printer,
     PrinterOption,
-    PrinterOptionChoice,
 )
+
+
+def _backend_attr(name: str) -> property:
+    """Expose a backend attribute (e.g. CUPS binary paths) as a read/write manager attribute."""
+
+    def fget(self: "PrinterManager") -> Any:
+        try:
+            return getattr(self._backend, name)
+        except AttributeError:
+            raise AttributeError(
+                f"'{name}' is not available on the {type(self._backend).__name__} backend"
+            ) from None
+
+    def fset(self: "PrinterManager", value: Any) -> None:
+        setattr(self._backend, name, value)
+
+    return property(fget, fset)
 
 
 class PrinterManager:
     """
     High-level manager for discovering local/network printers, querying PPD
-    capabilities, and submitting print jobs via CUPS.
+    capabilities, and submitting print jobs via CUPS (macOS/Unix) or the
+    Windows print spooler.
     """
+
+    lp_bin = _backend_attr("lp_bin")
+    lpstat_bin = _backend_attr("lpstat_bin")
+    lpoptions_bin = _backend_attr("lpoptions_bin")
+    cancel_bin = _backend_attr("cancel_bin")
+    _get_cups_env = _backend_attr("_get_cups_env")
+    _run_cmd = _backend_attr("_run_cmd")
 
     def __init__(
         self,
@@ -40,139 +59,37 @@ class PrinterManager:
         lpstat_bin: Optional[str] = None,
         lpoptions_bin: Optional[str] = None,
         cancel_bin: Optional[str] = None,
+        backend: Optional[PrinterBackend] = None,
     ):
-        self.lp_bin = lp_bin or shutil.which("lp") or "/usr/bin/lp"
-        self.lpstat_bin = lpstat_bin or shutil.which("lpstat") or "/usr/bin/lpstat"
-        self.lpoptions_bin = lpoptions_bin or shutil.which("lpoptions") or "/usr/bin/lpoptions"
-        self.cancel_bin = cancel_bin or shutil.which("cancel") or "/usr/bin/cancel"
-
-    def _get_cups_env(self) -> Dict[str, str]:
-        """
-        Return the standardized environment variables required to prevent
-        locale-dependent output changes (identified in PdfCraft::craft_print::lpstat_with).
-        """
-        env = os.environ.copy()
-        env["LC_ALL"] = "C"
-        env["LANG"] = "C"
-        return env
-
-    def _run_cmd(
-        self,
-        cmd: List[str],
-        check: bool = False,
-        timeout: Optional[float] = 5.0,
-    ) -> Tuple[int, str, str]:
-        """Execute a sub-process with sanitized CUPS environment variables and timeout protection."""
-        try:
-            res = subprocess.run(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                env=self._get_cups_env(),
-                timeout=timeout,
+        self._backend: PrinterBackend
+        if backend is not None:
+            self._backend = backend
+        elif sys.platform == "win32":
+            self._backend = Win32Backend()
+        else:
+            self._backend = CUPSBackend(
+                lp_bin=lp_bin,
+                lpstat_bin=lpstat_bin,
+                lpoptions_bin=lpoptions_bin,
+                cancel_bin=cancel_bin,
             )
-        except subprocess.TimeoutExpired:
-            err = f"Command timed out after {timeout}s: {' '.join(cmd)}"
-            if check:
-                raise PrintExecutionError(err, return_code=124, command=cmd)
-            return 124, "", err
-        except FileNotFoundError:
-            err = f"Command binary not found: {cmd[0]}"
-            if check:
-                raise SpoolerUnavailableError(err)
-            return 127, "", err
 
-        if check and res.returncode != 0:
-            err = res.stderr.strip() or res.stdout.strip()
-            if "spooler is not running" in err.lower() or "server-error" in err.lower():
-                raise SpoolerUnavailableError(f"CUPS spooler is not responding: {err}")
-            raise PrintExecutionError(
-                f"Command failed ({res.returncode}): {' '.join(cmd)}\n{err}",
-                return_code=res.returncode,
-                command=cmd,
-            )
-        return res.returncode, res.stdout, res.stderr
+    @property
+    def backend(self) -> PrinterBackend:
+        """The platform backend this manager dispatches to."""
+        return self._backend
 
     # =========================================================================
     # PRINTER DISCOVERY & ENUMERATION
     # =========================================================================
 
     def list_printers(self, load_options: bool = False) -> List[Printer]:
-        """
-        Discover all installed printers and their status on macOS.
-        Replicates the dual-phase discovery logic of `PdfCraft::craft_print::printers`.
-        """
-        code, stdout, stderr = self._run_cmd([self.lpstat_bin, "-p", "-d"])
-        if code != 0 and not stdout:
-            if "spooler is not running" in stderr.lower() or "server-error" in stderr.lower():
-                raise SpoolerUnavailableError(f"CUPS print spooler error: {stderr.strip()}")
-            if code == 127 or "not found" in stderr.lower():
-                return []
-
-        printers_dict: Dict[str, Printer] = {}
-        default_printer_name: Optional[str] = None
-
-        # 1. Parse `lpstat -p -d`
-        for line in stdout.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-
-            # Check default printer line: "system default destination: HP_LaserJet_..."
-            if line.startswith("system default destination:"):
-                parts = line.split(":", 1)
-                if len(parts) == 2:
-                    default_printer_name = parts[1].strip()
-                continue
-
-            # Check printer status: "printer HP_LaserJet... is idle. enabled since ..."
-            if line.startswith("printer "):
-                # regex: printer (\S+) (is idle|disabled|printing)
-                match = re.match(r"^printer\s+([^\s]+)\s+(.+)$", line)
-                if match:
-                    p_name = match.group(1)
-                    p_status = match.group(2)
-                    printers_dict[p_name] = Printer(
-                        name=p_name,
-                        status=p_status,
-                        is_default=False,
-                    )
-
-        # 2. Supplementary enumeration via `lpstat -e` (modern CUPS available destinations)
-        code_e, stdout_e, _ = self._run_cmd([self.lpstat_bin, "-e"])
-        if code_e == 0 and stdout_e:
-            for p_name in stdout_e.splitlines():
-                p_name = p_name.strip()
-                if p_name and p_name not in printers_dict:
-                    printers_dict[p_name] = Printer(
-                        name=p_name,
-                        status="ready",
-                        is_default=False,
-                    )
-
-        # 3. Mark the default printer
-        if default_printer_name and default_printer_name in printers_dict:
-            printers_dict[default_printer_name].is_default = True
-        elif printers_dict and not default_printer_name:
-            # If default wasn't found but printers exist, pick first
-            first_printer = next(iter(printers_dict.values()))
-            first_printer.is_default = True
-
-        # Optionally load hardware options for each printer
-        if load_options:
-            for p in printers_dict.values():
-                p.options = self.get_printer_options(p.name)
-
-        return list(printers_dict.values())
+        """Discover all installed printers and their status."""
+        return self._backend.list_printers(load_options=load_options)
 
     def get_default_printer(self) -> Optional[Printer]:
         """Return the default system printer, or None if no printers exist."""
-        printers = self.list_printers(load_options=False)
-        for p in printers:
-            if p.is_default:
-                return p
-        return printers[0] if printers else None
+        return self._backend.get_default_printer()
 
     def get_printer(self, name: str, load_options: bool = True) -> Optional[Printer]:
         """Find a printer by name."""
@@ -189,53 +106,8 @@ class PrinterManager:
     # =========================================================================
 
     def get_printer_options(self, printer_name: str) -> Dict[str, PrinterOption]:
-        """
-        Query available hardware options and supported values for a printer
-        by executing and parsing `lpoptions -p <printer_name> -l`.
-        """
-        code, stdout, stderr = self._run_cmd(
-            [self.lpoptions_bin, "-p", printer_name, "-l"], timeout=3.0
-        )
-        if code != 0:
-            return {}
-
-        options: Dict[str, PrinterOption] = {}
-        for line in stdout.splitlines():
-            line = line.strip()
-            if not line or ":" not in line:
-                continue
-
-            header_part, choices_part = line.split(":", 1)
-            # header format: "Keyword/Human Readable Title" or "Keyword"
-            if "/" in header_part:
-                keyword, display_name = header_part.split("/", 1)
-            else:
-                keyword, display_name = header_part, header_part
-
-            keyword = keyword.strip()
-            display_name = display_name.strip()
-
-            choice_tokens = choices_part.strip().split()
-            choices: List[PrinterOptionChoice] = []
-
-            for token in choice_tokens:
-                is_def = token.startswith("*")
-                name = token[1:] if is_def else token
-                choices.append(
-                    PrinterOptionChoice(
-                        name=name,
-                        display_text=name,
-                        is_default=is_def,
-                    )
-                )
-
-            options[keyword] = PrinterOption(
-                keyword=keyword,
-                display_name=display_name,
-                choices=choices,
-            )
-
-        return options
+        """Query available hardware/driver options and supported values for a printer."""
+        return self._backend.get_printer_options(printer_name)
 
     # =========================================================================
     # JOB SUBMISSION
@@ -246,13 +118,16 @@ class PrinterManager:
         file_path: Union[str, Path],
         options: Optional[PrintJobOptions] = None,
         force_pdf_conversion: bool = False,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> PrintResult:
         """
         Print a document of any supported type (PDF, DOCX, RTF, images, text).
         Handles conversion automatically if required, builds arguments matching
-        `PdfCraft` specifications, and submits to the CUPS spooler via `/usr/bin/lp`.
+        `PdfCraft` specifications, and submits to the spooler via `/usr/bin/lp` or Win32.
         """
         opts = options or PrintJobOptions()
+        if progress_callback:
+            opts.progress_callback = progress_callback
         target_path = Path(file_path).expanduser().resolve()
         if not target_path.exists():
             raise FileNotFoundError(f"Cannot print non-existent file: {target_path}")
@@ -277,88 +152,27 @@ class PrinterManager:
         if not opts.title:
             opts.title = target_path.name
 
-        # Detect repeated/non-monotonic page ranges (e.g. "1,1,1,1")
-        # CUPS lp throws "Bad page-ranges" if pages repeat or aren't strictly increasing.
-        # We handle this transparently by duplicating pages via PDFKit before spooling.
-        page_sequence = None
-        if opts.page_ranges:
-            try:
-                tokens = [t.strip() for t in opts.page_ranges.split(",")]
-                parsed_pages = []
-                is_simple_list = True
-                for t in tokens:
-                    if "-" in t:
-                        is_simple_list = False
-                        break
-                    parsed_pages.append(int(t))
-                if is_simple_list and parsed_pages:
-                    # Check if there are duplicates or descending order
-                    if len(parsed_pages) != len(set(parsed_pages)) or parsed_pages != sorted(parsed_pages):
-                        page_sequence = parsed_pages
-                        # Clear from lp options so lp receives clean file
-                        opts.page_ranges = None
-            except Exception:
-                pass
+        return self._backend.submit_file(
+            target_path, opts, force_pdf_conversion=force_pdf_conversion
+        )
 
-        if opts.repeat and opts.repeat > 1 and page_sequence is None:
-            # Repeat the document page(s)
-            page_sequence = [1] * opts.repeat
-
-        with DocumentConverter.prepare_for_print(
-            target_path, force_pdf=force_pdf_conversion, page_sequence=page_sequence
-        ) as printable_path:
-            lp_args = opts.build_lp_args()
-            cmd = [self.lp_bin] + lp_args + [str(printable_path)]
-
-            if opts.dry_run:
-                return PrintResult(
-                    success=True,
-                    printer=target_printer,
-                    job_id="DRY-RUN-0",
-                    command_run=cmd,
-                    output="Dry run executed successfully. No job sent to printer.",
-                    dry_run=True,
-                )
-
-            code, stdout, stderr = self._run_cmd(cmd)
-
-            if code != 0:
-                err_msg = stderr.strip() or stdout.strip()
-                if "spooler is not running" in err_msg.lower():
-                    raise SpoolerUnavailableError(f"CUPS spooler is down: {err_msg}")
-                return PrintResult(
-                    success=False,
-                    printer=target_printer,
-                    command_run=cmd,
-                    output=stdout.strip(),
-                    error=err_msg,
-                )
-
-            # Extract CUPS request id: "request id is HP_LaserJet_Professional_M1136_MFP-104 (1 file(s))"
-            job_id: Optional[str] = None
-            match = re.search(r"request id is ([^\s]+)", stdout)
-            if match:
-                job_id = match.group(1)
-
-            return PrintResult(
-                success=True,
-                printer=target_printer,
-                job_id=job_id,
-                command_run=cmd,
-                output=stdout.strip(),
-            )
+    # Alias for convenience matching common naming
+    print_file = print_document
 
     def print_bytes(
         self,
         data: bytes,
         title: str = "Untitled Document",
         options: Optional[PrintJobOptions] = None,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> PrintResult:
         """
-        Print raw bytes (e.g. PDF or PostScript binary stream) directly to `/usr/bin/lp` stdin,
-        identical to `PdfCraft::craft_print::submit_with_progress`.
+        Print raw bytes (e.g. PDF or PostScript binary stream) directly to the spooler,
+        matching `PdfCraft::craft_print::submit_with_progress`.
         """
         opts = options or PrintJobOptions()
+        if progress_callback:
+            opts.progress_callback = progress_callback
         target_printer = opts.printer or (self.get_default_printer() or Printer(name="")).name
         if not target_printer:
             raise PrinterNotFoundError("No printer available.")
@@ -366,82 +180,46 @@ class PrinterManager:
         opts.printer = target_printer
         opts.title = title
 
-        cmd = [self.lp_bin] + opts.build_lp_args()
+        return self._backend.submit_bytes(data, opts)
 
-        if opts.dry_run:
-            return PrintResult(
-                success=True,
-                printer=target_printer,
-                job_id="DRY-RUN-0",
-                command_run=cmd,
-                output="Dry run bytes submission.",
-                dry_run=True,
-            )
+    def command_preview(
+        self,
+        target_path_or_bytes: Union[str, Path, bytes],
+        options: Optional[PrintJobOptions] = None,
+        title: Optional[str] = None,
+    ) -> List[str]:
+        """
+        Preview the exact command line or backend descriptor that would be executed,
+        without sending anything to the printer or starting a print job.
+        Matches `craft_print::command_preview`.
+        """
+        base_opts = options or PrintJobOptions()
+        dry_opts = dataclasses.replace(base_opts, dry_run=True)
+        if isinstance(target_path_or_bytes, (str, Path)):
+            result = self.print_file(target_path_or_bytes, options=dry_opts)
+        else:
+            result = self.print_bytes(target_path_or_bytes, title=title or "Preview", options=dry_opts)
+        return result.command_run
 
-        res = subprocess.run(
-            cmd,
-            input=data,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=self._get_cups_env(),
-        )
-
-        stdout = res.stdout.decode("utf-8", errors="ignore").strip()
-        stderr = res.stderr.decode("utf-8", errors="ignore").strip()
-
-        if res.returncode != 0:
-            return PrintResult(
-                success=False,
-                printer=target_printer,
-                command_run=cmd,
-                output=stdout,
-                error=stderr,
-            )
-
-        job_id = None
-        match = re.search(r"request id is ([^\s]+)", stdout)
-        if match:
-            job_id = match.group(1)
-
-        return PrintResult(
-            success=True,
-            printer=target_printer,
-            job_id=job_id,
-            command_run=cmd,
-            output=stdout,
-        )
+    def open_printer_preferences(self, printer_name: Optional[str] = None) -> bool:
+        """
+        Open the native system printer preferences or properties dialog for a printer.
+        On Windows, opens the driver's printing preferences (printui.dll /e).
+        On macOS/Linux, opens system printer settings or CUPS web admin.
+        """
+        target = printer_name or (self.get_default_printer() or Printer(name="")).name
+        if not target:
+            raise PrinterNotFoundError("No printer specified or available.")
+        return self._backend.open_printer_preferences(target)
 
     # =========================================================================
     # QUEUE & JOB MANAGEMENT
     # =========================================================================
 
     def get_jobs(self, printer_name: Optional[str] = None) -> List[Dict[str, Any]]:
-        """List active print jobs from the CUPS queue."""
-        cmd = [self.lpstat_bin, "-o"]
-        if printer_name:
-            cmd.append(printer_name)
-
-        code, stdout, stderr = self._run_cmd(cmd)
-        jobs: List[Dict[str, Any]] = []
-
-        # Example output: "HP_LaserJet-104 user 1024 Sun Oct 25 18:00:00 2026"
-        for line in stdout.splitlines():
-            parts = line.strip().split()
-            if len(parts) >= 4:
-                jobs.append({
-                    "job_id": parts[0],
-                    "user": parts[1],
-                    "size_bytes": parts[2],
-                    "date": " ".join(parts[3:]),
-                })
-        return jobs
+        """List active print jobs from the system queue."""
+        return self._backend.get_jobs(printer_name)
 
     def cancel_job(self, job_id_or_printer: str, purge_all: bool = False) -> bool:
         """Cancel a specific print job or purge all jobs for a printer."""
-        if purge_all:
-            cmd = [self.cancel_bin, "-a", job_id_or_printer]
-        else:
-            cmd = [self.cancel_bin, job_id_or_printer]
-
-        code, _, _ = self._run_cmd(cmd)
-        return code == 0
+        return self._backend.cancel_job(job_id_or_printer, purge_all=purge_all)

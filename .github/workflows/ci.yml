@@ -1,0 +1,94 @@
+name: CI
+
+# One workflow for everything:
+#   - pull requests and pushes to main: tests on Linux, macOS and Windows
+#   - v* tags: the same tests, then build and publish the release
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  test-unix:
+    name: Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install CUPS client (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y cups-client
+      - name: Install printer-craft and test dependencies
+        run: python -m pip install --upgrade pip . pypdf Pillow pypdfium2
+      - name: Run test suite
+        run: python -m unittest discover tests -v
+
+  test-windows:
+    name: Tests (windows-latest)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install printer-craft (plain install, no extras)
+        run: python -m pip install --upgrade pip .
+      - name: Run platform-independent and Windows backend tests
+        run: python -m unittest tests.test_models tests.test_backends tests.test_win32_backend tests.test_win32_render -v
+      - name: Add a print-to-file test printer
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP "printer_craft_out.bin"
+          Add-PrinterPort -Name $out
+          Add-Printer -Name "PrinterCraftTest" -DriverName "Microsoft Print To PDF" -PortName $out
+          "PRINTER_CRAFT_OUTPUT=$out" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Real Windows spooler smoke test
+        run: python .github/scripts/windows_smoke.py
+
+  release:
+    name: Build & Publish Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test-unix, test-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # GitHub Release
+      id-token: write   # PyPI trusted publishing
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build wheel and sdist
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes
+      # Enable by configuring a PyPI trusted publisher for this repo/workflow
+      # and setting the repository variable PUBLISH_TO_PYPI=true.
+      - name: Publish to PyPI
+        if: vars.PUBLISH_TO_PYPI == 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1

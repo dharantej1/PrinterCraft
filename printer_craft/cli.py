@@ -19,7 +19,7 @@ from .models import ColorMode, DuplexMode, Orientation, PrintJobOptions, PrintSc
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="printer-craft",
-        description="Universal CLI printing tool for macOS/Linux (reverse-engineered from PdfCraft.app)",
+        description="Universal CLI printing tool for macOS, Linux and Windows (reverse-engineered from PdfCraft.app)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -67,6 +67,12 @@ Examples:
     cancel_parser.add_argument(
         "-a", "--all", action="store_true", help="Purge all jobs for the specified printer"
     )
+
+    # ================= PREFERENCES SUBCOMMAND =================
+    prefs_parser = subparsers.add_parser(
+        "prefs", aliases=["preferences"], help="Open native printer preferences dialog"
+    )
+    prefs_parser.add_argument("printer", nargs="?", help="Printer name (defaults to system default)")
 
     return parser
 
@@ -172,6 +178,13 @@ def _add_print_arguments(parser: argparse.ArgumentParser) -> None:
         help="Force pre-conversion of document to PDF before spooling",
     )
 
+    # Rendering DPI
+    parser.add_argument(
+        "--dpi",
+        type=int,
+        help="Target rendering DPI for Windows printing (e.g. 300, 600, 1200)",
+    )
+
     # Dry-run
     parser.add_argument(
         "--dry-run",
@@ -212,6 +225,7 @@ def handle_print(args: argparse.Namespace, mgr: PrinterManager) -> int:
         repeat=args.repeat,
         raw_options=raw_dict,
         dry_run=args.dry_run,
+        dpi=getattr(args, "dpi", None),
     )
 
     try:
@@ -320,12 +334,26 @@ def handle_cancel(args: argparse.Namespace, mgr: PrinterManager) -> int:
         return 1
 
 
+def handle_preferences(args: argparse.Namespace, mgr: PrinterManager) -> int:
+    try:
+        success = mgr.open_printer_preferences(args.printer)
+        if success:
+            print(f"Opened preferences for printer: {args.printer or 'default'}")
+            return 0
+        else:
+            print(f"Failed to open preferences for printer: {args.printer or 'default'}", file=sys.stderr)
+            return 1
+    except Exception as e:
+        print(f"Error opening preferences: {e}", file=sys.stderr)
+        return 1
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = build_parser()
 
     # If first argument looks like a file and isn't a known subcommand, default to 'print'
     args_list = sys.argv[1:] if argv is None else argv
-    if args_list and args_list[0] not in ("print", "list", "options", "jobs", "cancel", "-h", "--help"):
+    if args_list and args_list[0] not in ("print", "list", "options", "jobs", "cancel", "prefs", "preferences", "-h", "--help"):
         args_list = ["print"] + args_list
 
     parsed = parser.parse_args(args_list)
@@ -345,6 +373,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return handle_jobs(parsed, mgr)
     elif parsed.command == "cancel":
         return handle_cancel(parsed, mgr)
+    elif parsed.command in ("prefs", "preferences"):
+        return handle_preferences(parsed, mgr)
     return 0
 
 
