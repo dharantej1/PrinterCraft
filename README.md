@@ -691,7 +691,51 @@ mgr.cancel_job("HP_LaserJet_Professional_M1136_MFP", purge_all=True)
 
 ---
 
-### 8. Error Handling
+### 8. Native Printer Preferences & Command Preview
+
+#### `open_printer_preferences(printer_name=None)` → `bool`
+
+Opens the operating system's native printer preferences or properties dialog for a printer (matching `PdfCraft::craft_print::open_printer_preferences`):
+* **Windows**: Directly opens the driver's printing preferences via `rundll32.exe printui.dll,PrintUIEntry /e /n "<printer>"`.
+* **macOS**: Opens the Printers & Scanners panel in System Settings (`x-apple.systempreferences:com.apple.preference.printfax`).
+* **Linux**: Opens the CUPS web administration page (`http://localhost:631/printers/<printer>`) in the default browser.
+
+```python
+# Open preferences for the default printer
+mgr.open_printer_preferences()
+
+# Open preferences for a specific printer
+mgr.open_printer_preferences("HP LaserJet Pro M404")
+```
+
+#### `command_preview(target, options=None, title=None)` → `List[str]`
+
+Previews the exact backend command line or diagnostic descriptor that would be executed, without sending any data to hardware (matching `craft_print::command_preview`):
+
+```python
+opts = PrintJobOptions(printer="HP LaserJet", copies=2, dpi=600)
+cmd = mgr.command_preview("document.pdf", options=opts)
+print("Preview:", " ".join(cmd))
+```
+
+#### Progress Reporting Callback (`progress_callback`)
+
+Pass a callback function `(current_sheet: int, total_sheets: int) -> None` to receive real-time sheet-by-sheet progress as each page is spooled (matching `PdfCraft::craft_print::submit_with_progress`):
+
+```python
+def on_progress(current: int, total: int):
+    print(f"Spooled sheet {current} of {total}...")
+
+result = mgr.print_document(
+    "report.pdf",
+    options=PrintJobOptions(copies=2),
+    progress_callback=on_progress,
+)
+```
+
+---
+
+### 9. Error Handling
 
 All exceptions inherit from `PrinterError`. Catch them individually for
 granular recovery, or catch the base class for a catch-all.
@@ -831,7 +875,8 @@ The *CUPS Flag Generated* column describes macOS/Linux. Every parameter is also 
 | **`-R, --repeat`** | `Optional[int]` | `None` *(1 copy)* | Any positive integer (e.g. `2`, `4`, `8`) | Pre-spool PDF synthesis | Repeats the document/pages N times by synthesizing a multi-page PDF before spooling. Useful with `-N` (e.g. `--repeat 4 -N 4` to print 4 copies of an ID badge or card on a single page). |
 | **`-o, --option`** | `Dict[str, str]` | `[]` *(empty)* | `KEY=VALUE` (repeatable, e.g. `-o InputSlot=Manual -o Resolution=600dpi`) | `-o <KEY>=<VALUE>` | Direct PPD hardware driver overrides. Run `printer-craft options` to discover valid keys for your printer (e.g. `InputSlot`, `MediaType`, `Resolution`, `EconoMode`, `pjlDensity`). |
 | **`--force-pdf`** | `bool` | `False` | Flag: present (`True`) or absent (`False`) | *(Local pre-conversion)* | Forces pre-conversion of non-PDF documents or images into an intermediate PDF before spooling. |
-| **`--dry-run`** | `bool` | `False` | Flag: present (`True`) or absent (`False`) | *(None — preview only)* | Safe preview mode. Generates and displays the exact `/usr/bin/lp` command line without submitting the job to physical printer hardware. |
+| **`--dpi`** | `Optional[int]` | `None` *(300 DPI)* | Any positive integer (e.g. `300`, `600`, `1200`) | `-o dpi=<int>` | Target rendering resolution in DPI for Windows GDI rasterization (e.g. `--dpi 600` for crisp vector text on high-res printers). |
+| **`--dry-run`** | `bool` | `False` | Flag: present (`True`) or absent (`False`) | *(None — preview only)* | Safe preview mode. Generates and displays the exact `/usr/bin/lp` or `win32print` command line without submitting the job to physical printer hardware. |
 
 ---
 
@@ -853,6 +898,11 @@ The *CUPS Flag Generated* column describes macOS/Linux. Every parameter is also 
 | :--- | :--- | :--- | :--- |
 | **`printer`** | `str` (optional) | `None` *(all printers)* | Filter the active print job queue to show only jobs for the specified printer. |
 
+#### `printer-craft prefs [printer]` *(or `preferences`)*
+| Parameter | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| **`printer`** | `str` (optional) | `None` *(system default)* | Opens the native printing preferences or properties dialog (on Windows via `printui.dll`, on macOS/Linux via system printer settings). |
+
 #### `printer-craft cancel <job_id>`
 | Parameter / Flag | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
@@ -871,8 +921,9 @@ The *CUPS Flag Generated* column describes macOS/Linux. Every parameter is also 
 | :--- | :--- |
 | Discovery | `win32print.EnumPrinters` (local + network connections) and `GetDefaultPrinter` |
 | Driver options | `DeviceCapabilities` (paper sizes, trays, media types, resolutions, duplex, color, collate) with defaults from the printer `DEVMODE` |
-| Job settings | Applied to a `DEVMODE` and validated by the driver with `DocumentProperties` |
-| Printing documents | Pages are rendered (PDF → `pypdfium2`, images/text → `Pillow`, Office → LibreOffice/docx2pdf → PDF) and drawn on a printer device context (`CreateDC` / `StartDoc` / `StartPage` / `EndPage` / `EndDoc`). Works with every Windows printer driver. |
+| Job settings | Applied to a `DEVMODE` and validated by the driver with `DocumentProperties`. Checks hardware duplex capability (`DC_DUPLEX`) |
+| Preferences dialog | Native driver UI opened via `rundll32.exe printui.dll,PrintUIEntry /e /n "<printer>"` (`printer-craft prefs`) |
+| Printing documents | Pages are rendered (PDF → `pypdfium2`, images/text → `Pillow`, Office → LibreOffice/docx2pdf → PDF) and drawn on a printer device context (`CreateDC` / `StartDoc` / `StartPage` / `EndPage` / `EndDoc`). Supports configurable rendering DPI (300/600/1200+). Works with every Windows printer driver. |
 | Printing printer-language data | `.ps`, `.eps`, `.pcl`, `.pxl`, `.prn`, `.raw` files, non-PDF/non-image `print_bytes` data, and any job with `-o raw` are spooled unchanged with `StartDocPrinter` / `WritePrinter` and the `RAW` datatype |
 | Queue | `EnumJobs`; cancel with `SetJob(JOB_CONTROL_CANCEL)`; job ids are `<printer>-<id>` |
 
@@ -886,13 +937,14 @@ The *CUPS Flag Generated* column describes macOS/Linux. Every parameter is also 
 | `--collate` / `--no-collate` | `-o collate=` | `DEVMODE.Collate` (also honoured for software copies) |
 | `--duplex` | `-o sides=` | `DEVMODE.Duplex` (simplex / vertical / horizontal). With software copies, each collated copy starts on a new sheet |
 | `--color` | `-o print-color-mode=` | `DEVMODE.Color`; `monochrome` also renders pages in grayscale so color is never used |
-| `-m, --media` | `-o media=` | `DEVMODE.PaperSize` for common names (`Letter`, `Legal`, `A3`, `A4`, `A5`, `A6`, `B4`, `B5`, `Executive`, `Tabloid`, `Ledger`, `Statement`, `Env10`, `EnvDL`, and their PWG names like `iso_a4_210x297mm`); any other value is used as a Windows form name (e.g. `"Photo 4x6"`) |
+| `-m, --media` | `-o media=` | `DEVMODE.PaperSize` for standard sizes (`Letter`, `Legal`, `A0`–`A6`, `B4`, `B5`, `ARCH A`–`E`, `ANSI C`–`E`, `Executive`, `Tabloid`, `Ledger`, `Statement`, `Env10`, `EnvDL`, and PWG names); matches within 0.25mm (~0.71 pt) tolerance. Any other value is passed as a form name |
 | `-p, --pages` | `-o page-ranges=` | Applied by printer-craft; supports `1-5`, `2,4,7`, `3-`, `-2` and repeated/re-ordered lists like `1,1,1,1` exactly like the CUPS path |
 | `--orientation` | `-o orientation-requested=` | `DEVMODE.Orientation`; `reverse-*` additionally rotates the page 180° |
 | `--fit-to-page` / `--no-fit-to-page` | `-o fit-to-page=` | Pages are scaled to the printable area (default) or printed at 100% centered on the sheet |
 | `--scaling` | `-o print-scaling=` | `fit-to-page` (fit), `fill` (fill and crop), `none` (actual size), `auto` / `auto-fit` (shrink only if too large) — takes precedence over `--fit-to-page`, like CUPS |
 | `-N, --number-up` | `-o number-up=` | Pages laid out in a grid (1×2, 2×2, 2×3, 3×3, 4×4), auto-rotated to fill each cell |
 | `-R, --repeat` | Pre-spool PDF synthesis | Same semantics (repeats page 1 N times), applied by printer-craft |
+| `--dpi` | Driver hardware DPI | Rendering resolution in DPI (`--dpi 600` for crisp vector text on laser printers) |
 | `-o KEY=VALUE` | `-o KEY=VALUE` | See below |
 | `--force-pdf` | Pre-convert to PDF | Accepted; documents are always rendered on Windows. With `-o raw`, converts non-PDF input to PDF before sending |
 | `--dry-run` | Shows the `lp` command | Shows the equivalent `win32print ...` description |
@@ -904,6 +956,7 @@ Windows drivers do not use PPD files, so `-o` values are interpreted as follows 
 | Key | Example | Effect |
 | :--- | :--- | :--- |
 | Standard CUPS/IPP keys | `-o sides=two-sided-long-edge`, `-o number-up=4`, `-o media=A4`, `-o print-color-mode=monochrome`, `-o collate=false`, `-o orientation-requested=4`, `-o landscape`, `-o fit-to-page=false`, `-o print-scaling=fill`, `-o page-ranges=1-3`, `-o copies=2` | Same meaning as on CUPS |
+| `dpi` / `render-dpi` | `-o dpi=600` | Target rendering resolution for GDI printing |
 | `InputSlot` | `-o InputSlot="Tray 2"` | Paper tray, by name from `printer-craft options` (or numeric bin id) |
 | `MediaType` | `-o MediaType=Glossy` | Media type, by name from `printer-craft options` (or numeric id) |
 | `Resolution` | `-o Resolution=600dpi`, `-o Resolution=1200x600dpi` | `DEVMODE.PrintQuality` / `YResolution` |

@@ -398,3 +398,20 @@ class CUPSBackend(PrinterBackend):
 
         code, _, _ = self._run_cmd(cmd)
         return code == 0
+
+    def open_printer_preferences(self, printer_name: str) -> bool:
+        """Open system printer preferences or CUPS web admin page for a printer."""
+        import subprocess
+        import sys
+
+        try:
+            if sys.platform == "darwin":
+                subprocess.Popen(["open", "x-apple.systempreferences:com.apple.preference.printfax"])
+                return True
+            else:
+                url = f"http://localhost:631/printers/{printer_name}"
+                subprocess.Popen(["xdg-open", url])
+                return True
+        except Exception as e:
+            logger.error("Failed to open printer preferences: %s", e)
+            return False

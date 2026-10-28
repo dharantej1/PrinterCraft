@@ -535,13 +535,34 @@ def plan_sheets(
     return [sheet for sheet in sheets for _ in range(copies)]
 
 
-def render_placement(placement: Placement, geom: DeviceGeometry, grayscale: bool = False) -> Any:
-    """Rasterise a placed page at (at most MAX_RENDER_DPI) and rotate it into position."""
+def match_standard_paper(width_pt: float, height_pt: float, tolerance_pt: float = 0.71) -> Optional[str]:
+    """
+    Match sheet dimensions (w, h) in points (either orientation) to standard paper names.
+    Default tolerance is ~0.71 pt (0.25 mm), matching pdfcraft's paper matching algorithm.
+    """
+    from ..models import STANDARD_PAPER_SIZES
+
+    w, h = min(width_pt, height_pt), max(width_pt, height_pt)
+    for name, (pw, ph) in STANDARD_PAPER_SIZES.items():
+        standard_w, standard_h = min(pw, ph), max(pw, ph)
+        if abs(standard_w - w) <= tolerance_pt and abs(standard_h - h) <= tolerance_pt:
+            return name
+    return None
+
+
+def render_placement(
+    placement: Placement,
+    geom: DeviceGeometry,
+    grayscale: bool = False,
+    dpi: Optional[int] = None,
+) -> Any:
+    """Rasterise a placed page at target DPI (defaults to MAX_RENDER_DPI or geom DPI) and rotate it into position."""
     left, top, right, bottom = placement.rect
     w, h = right - left, bottom - top
     if placement.rotation in (90, 270):
         w, h = h, w
-    factor = min(1.0, MAX_RENDER_DPI / float(min(geom.dpi_x, geom.dpi_y)))
+    target_dpi = dpi if dpi and dpi > 0 else MAX_RENDER_DPI
+    factor = min(1.0, float(target_dpi) / float(min(geom.dpi_x, geom.dpi_y)))
     image = placement.source.render(max(1, int(round(w * factor))), max(1, int(round(h * factor))))
     if placement.rotation:
         image = image.rotate(placement.rotation, expand=True)

@@ -46,3 +46,7 @@ class PrinterBackend(ABC):
     @abstractmethod
     def cancel_job(self, job_id_or_printer: str, purge_all: bool = False) -> bool:
         """Cancel a specific print job or purge all jobs for a printer."""
+
+    @abstractmethod
+    def open_printer_preferences(self, printer_name: str) -> bool:
+        """Open the system printer preferences / properties dialog for a printer."""

@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 
 class DuplexMode(str, Enum):
@@ -144,6 +144,8 @@ class PrintJobOptions:
     repeat: Optional[int] = None
     raw_options: Dict[str, str] = field(default_factory=dict)
     dry_run: bool = False
+    dpi: Optional[int] = None
+    progress_callback: Optional[Callable[[int, int], None]] = None
 
     def build_lp_args(self) -> List[str]:
         """
@@ -264,11 +266,13 @@ _WIN32_ORIENTATION = {
 _WIN32_PAPER_SIZES = {
     "letter": 1,
     "na_letter_8.5x11in": 1,
+    "us letter": 1,
     "tabloid": 3,
     "na_ledger_11x17in": 3,
     "ledger": 4,
     "legal": 5,
     "na_legal_8.5x14in": 5,
+    "us legal": 5,
     "statement": 6,
     "na_invoice_5.5x8.5in": 6,
     "executive": 7,
@@ -285,10 +289,53 @@ _WIN32_PAPER_SIZES = {
     "jis_b5_182x257mm": 13,
     "env10": 20,
     "na_number-10_4.125x9.5in": 20,
+    "csheet": 24,
+    "c-sheet": 24,
+    "ansi c": 24,
+    "ansi_c": 24,
+    "dsheet": 25,
+    "d-sheet": 25,
+    "ansi d": 25,
+    "ansi_d": 25,
+    "esheet": 26,
+    "e-sheet": 26,
+    "ansi e": 26,
+    "ansi_e": 26,
     "envdl": 27,
     "iso_dl_110x220mm": 27,
+    "a2": 66,
+    "iso_a2_420x594mm": 66,
     "a6": 70,
     "iso_a6_105x148mm": 70,
+}
+
+# Standard paper sizes in points (width, height) in portrait orientation.
+# Used for tolerance-based paper matching (0.25 mm ~ 0.71 pt tolerance).
+STANDARD_PAPER_SIZES: Dict[str, Tuple[float, float]] = {
+    "letter": (612.0, 792.0),
+    "legal": (612.0, 1008.0),
+    "tabloid": (792.0, 1224.0),
+    "ledger": (792.0, 1224.0),
+    "statement": (396.0, 612.0),
+    "executive": (522.0, 756.0),
+    "a6": (297.64, 419.53),
+    "a5": (419.53, 595.28),
+    "a4": (595.28, 841.89),
+    "a3": (841.89, 1190.55),
+    "a2": (1190.55, 1683.78),
+    "a1": (1683.78, 2383.94),
+    "a0": (2383.94, 3370.39),
+    "b5": (515.91, 728.50),
+    "b4": (728.50, 1031.89),
+    "arch_a": (648.0, 864.0),
+    "arch_b": (864.0, 1296.0),
+    "arch_c": (1296.0, 1728.0),
+    "arch_d": (1728.0, 2592.0),
+    "arch_e1": (2160.0, 3024.0),
+    "arch_e": (2592.0, 3456.0),
+    "ansi_c": (1224.0, 1584.0),
+    "ansi_d": (1584.0, 2448.0),
+    "ansi_e": (2448.0, 3168.0),
 }
 
 

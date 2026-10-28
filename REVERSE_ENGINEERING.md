@@ -171,3 +171,41 @@ The reverse engineering reveals that `PdfCraft.app`:
 3. Supports rich options via `-o key=value` pairs matching CUPS specifications and PPD capabilities.
 
 This clean, robust architecture can be fully codified and expanded into a reusable Python library and CLI tool.
+
+---
+
+## 6. Windows Subsystem Analysis: `PdfCraft` & `craft-print` Architecture
+
+Analysis of the upstream `storytold/pdfcraft` codebase and its core system spooler crate (`craft-libs/crates/print`) uncovered how the application operates on Windows:
+
+### 1. In-Process Spooling & Zero-Script Execution
+On Windows, `PdfCraft` starts **no child processes** (no PowerShell, VBScript, or `cmd.exe`). Spooling executes 100% in-process against native Win32/WinRT APIs:
+- `EnumPrinters` (local and networked `\\server\queue` destinations)
+- `GetDefaultPrinter`
+- `PrintCapabilities::fetch` / `PrintTicket` validation
+
+This design ensures compliance with corporate script lockdowns, including **AppLocker** (Constrained Language Mode) and **Windows Defender Application Control (WDAC)**. The only external program ever started is:
+```cmd
+rundll32.exe printui.dll,PrintUIEntry /e /n "<printer_name>"
+```
+and only when the user explicitly opens Printer Preferences.
+
+### 2. XPS Print API & Vector Spooling
+Instead of legacy Win16/Win32 GDI rasterization, `pdfcraft` uses:
+- `Windows.Data.Pdf` with **Direct2D** to render pages as scalable vectors into the **XPS Print API** (`winprint` crate / `IXpsPrintJob`).
+- Spool files remain compact vector packages rather than massive uncompressed bitmaps.
+
+### 3. XML PrintTicket vs Legacy DEVMODE
+Options travel via XML `PrintTicket` (`http://schemas.microsoft.com/windows/2003/08/printing/printschemaframework`). The driver validates the ticket against its `PrintCapabilities` before spooling. If the driver would drop or alter scaling, duplex, or paper size, the job is refused upfront rather than printed incorrectly.
+
+### 4. Vendor Driver Quirk Workarounds
+- **Brother Namespace Collision Fix**: Windows ticket merging renames custom vendor namespaces (`brpsk` to `ns0000`). A Brother driver then aborts every page with `0x80040003`. `craft-print` resolves this via an XML respelling engine (`ticket::respell`) that restores the driver's default prefixes.
+- **0.25mm Tolerance Paper Matching**: Matches physical sheet dimensions against driver media entries within 250 µm (~0.71 pt), preferring standard keyword names (`psk:ISOA4`) over vendor custom entries.
+
+### 5. Architectural Harmonization in `PrinterCraft`
+`PrinterCraft` incorporates these findings into its Windows backend (`Win32Backend` and `win32_render.py`):
+1. **Script-Free In-Process Spooling**: Uses `win32print` and GDI device contexts in-process without spawning shell commands.
+2. **Native Preferences**: `PrinterManager.open_printer_preferences()` and `printer-craft prefs` invoke `rundll32 printui.dll`.
+3. **Adaptive High-DPI Resolution**: `--dpi` flag allows 600+ DPI rendering for vector text clarity.
+4. **Tolerance-Based Paper Matching**: `match_standard_paper()` matches within 0.25mm tolerance across standard architectural (`ARCH A–E`), engineering (`ANSI C–E`), and ISO sizes.
+5. **Real-time Progress Streaming**: `progress_callback` streams sheet-by-sheet progress during spooling matching `submit_with_progress`.

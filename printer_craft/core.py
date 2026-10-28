@@ -5,9 +5,10 @@ Core printer management API, reverse-engineered from macOS PdfCraft.app architec
 
 from __future__ import annotations
 
+import dataclasses
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from .backends.base import PrinterBackend
 from .backends.cups_backend import CUPSBackend
@@ -58,9 +59,12 @@ class PrinterManager:
         lpstat_bin: Optional[str] = None,
         lpoptions_bin: Optional[str] = None,
         cancel_bin: Optional[str] = None,
+        backend: Optional[PrinterBackend] = None,
     ):
         self._backend: PrinterBackend
-        if sys.platform == "win32":
+        if backend is not None:
+            self._backend = backend
+        elif sys.platform == "win32":
             self._backend = Win32Backend()
         else:
             self._backend = CUPSBackend(
@@ -114,13 +118,16 @@ class PrinterManager:
         file_path: Union[str, Path],
         options: Optional[PrintJobOptions] = None,
         force_pdf_conversion: bool = False,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> PrintResult:
         """
         Print a document of any supported type (PDF, DOCX, RTF, images, text).
         Handles conversion automatically if required, builds arguments matching
-        `PdfCraft` specifications, and submits to the CUPS spooler via `/usr/bin/lp`.
+        `PdfCraft` specifications, and submits to the spooler via `/usr/bin/lp` or Win32.
         """
         opts = options or PrintJobOptions()
+        if progress_callback:
+            opts.progress_callback = progress_callback
         target_path = Path(file_path).expanduser().resolve()
         if not target_path.exists():
             raise FileNotFoundError(f"Cannot print non-existent file: {target_path}")
@@ -149,17 +156,23 @@ class PrinterManager:
             target_path, opts, force_pdf_conversion=force_pdf_conversion
         )
 
+    # Alias for convenience matching common naming
+    print_file = print_document
+
     def print_bytes(
         self,
         data: bytes,
         title: str = "Untitled Document",
         options: Optional[PrintJobOptions] = None,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> PrintResult:
         """
-        Print raw bytes (e.g. PDF or PostScript binary stream) directly to `/usr/bin/lp` stdin,
-        identical to `PdfCraft::craft_print::submit_with_progress`.
+        Print raw bytes (e.g. PDF or PostScript binary stream) directly to the spooler,
+        matching `PdfCraft::craft_print::submit_with_progress`.
         """
         opts = options or PrintJobOptions()
+        if progress_callback:
+            opts.progress_callback = progress_callback
         target_printer = opts.printer or (self.get_default_printer() or Printer(name="")).name
         if not target_printer:
             raise PrinterNotFoundError("No printer available.")
@@ -168,6 +181,36 @@ class PrinterManager:
         opts.title = title
 
         return self._backend.submit_bytes(data, opts)
+
+    def command_preview(
+        self,
+        target_path_or_bytes: Union[str, Path, bytes],
+        options: Optional[PrintJobOptions] = None,
+        title: Optional[str] = None,
+    ) -> List[str]:
+        """
+        Preview the exact command line or backend descriptor that would be executed,
+        without sending anything to the printer or starting a print job.
+        Matches `craft_print::command_preview`.
+        """
+        base_opts = options or PrintJobOptions()
+        dry_opts = dataclasses.replace(base_opts, dry_run=True)
+        if isinstance(target_path_or_bytes, (str, Path)):
+            result = self.print_file(target_path_or_bytes, options=dry_opts)
+        else:
+            result = self.print_bytes(target_path_or_bytes, title=title or "Preview", options=dry_opts)
+        return result.command_run
+
+    def open_printer_preferences(self, printer_name: Optional[str] = None) -> bool:
+        """
+        Open the native system printer preferences or properties dialog for a printer.
+        On Windows, opens the driver's printing preferences (printui.dll /e).
+        On macOS/Linux, opens system printer settings or CUPS web admin.
+        """
+        target = printer_name or (self.get_default_printer() or Printer(name="")).name
+        if not target:
+            raise PrinterNotFoundError("No printer specified or available.")
+        return self._backend.open_printer_preferences(target)
 
     # =========================================================================
     # QUEUE & JOB MANAGEMENT

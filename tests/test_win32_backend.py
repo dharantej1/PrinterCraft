@@ -521,5 +521,30 @@ class TestWindowsConverterFallbacks(unittest.TestCase):
                 run.assert_not_called()
 
 
+class TestWin32NewFeatures(Win32TestCase):
+    def test_open_printer_preferences_calls_rundll32(self):
+        with patch("subprocess.Popen") as popen:
+            res = self.backend.open_printer_preferences("HP LaserJet")
+            self.assertTrue(res)
+            popen.assert_called_once()
+            cmd = popen.call_args[0][0]
+            self.assertEqual(cmd, ["rundll32.exe", "printui.dll,PrintUIEntry", "/e", "/n", "HP LaserJet"])
+
+    def test_effective_options_dpi(self):
+        opts = PrintJobOptions(raw_options={"dpi": "600"})
+        eff, driver, raw = self.backend._effective_options(opts)
+        self.assertEqual(eff.dpi, 600)
+        self.assertFalse(raw)
+        layout_args = dict(self.backend._layout_args(eff, driver, 1))
+        self.assertEqual(layout_args.get("dpi"), 600)
+
+    def test_command_preview(self):
+        mgr = PrinterManager(backend=self.backend)
+        opts = PrintJobOptions(printer="HP LaserJet", copies=2)
+        cmd = mgr.command_preview(b"raw-spool-payload", options=opts)
+        self.assertIn("HP LaserJet", cmd)
+        self.assertTrue(any("Copies=2" in c for c in cmd))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -106,5 +106,23 @@ class TestSniff(unittest.TestCase):
         self.assertIsNone(sniff_bytes(b"\x1bE PCL"))
 
 
+class TestPaperMatching(unittest.TestCase):
+    def test_match_standard_paper_names(self):
+        from printer_craft.backends.win32_render import match_standard_paper
+
+        # Exact and within tolerance (0.25 mm ~ 0.71 pt)
+        self.assertEqual(match_standard_paper(612.0, 792.0), "letter")
+        self.assertEqual(match_standard_paper(792.0, 612.0), "letter")  # landscape
+        self.assertEqual(match_standard_paper(595.28, 841.89), "a4")
+        self.assertEqual(match_standard_paper(841.89, 595.28), "a4")
+        self.assertEqual(match_standard_paper(841.89, 1190.55), "a3")
+        self.assertEqual(match_standard_paper(1728.0, 2592.0), "arch_d")
+        self.assertEqual(match_standard_paper(1584.0, 2448.0), "ansi_d")
+        # Near match within 0.5 pt
+        self.assertEqual(match_standard_paper(612.3, 791.8), "letter")
+        # Non-matching custom size returns None
+        self.assertIsNone(match_standard_paper(500.0, 500.0))
+
+
 if __name__ == "__main__":
     unittest.main()

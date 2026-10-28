@@ -446,6 +446,8 @@ class Win32Backend(PrinterBackend):
                     eff.page_ranges = v
                 elif k == "copies":
                     eff.copies = int(v)
+                elif k in ("dpi", "render-dpi"):
+                    eff.dpi = int(v)
                 elif k in DRIVER_OPTION_KEYS:
                     driver[DRIVER_OPTION_KEYS[k]] = v
                 else:
@@ -545,6 +547,8 @@ class Win32Backend(PrinterBackend):
             args.append(("repeat", opts.repeat))
         if emulated_copies > 1:
             args.append(("copies-emulated", emulated_copies))
+        if opts.dpi:
+            args.append(("dpi", opts.dpi))
         args.extend(driver.items())
         return args
 
@@ -679,6 +683,14 @@ class Win32Backend(PrinterBackend):
         except Exception as e:
             return PrintResult(success=False, printer=printer, command_run=cmd, error=str(e))
 
+        if opts.duplex in (DuplexMode.TWO_SIDED_LONG_EDGE, DuplexMode.TWO_SIDED_SHORT_EDGE):
+            try:
+                duplex_cap = self._capability(printer, self._printer_port(printer), DC_DUPLEX)
+                if duplex_cap == 0:
+                    logger.warning("Printer '%s' does not advertise duplex capability (DC_DUPLEX=0)", printer)
+            except Exception:
+                pass
+
         try:
             geom = self._geometry(hdc)
             with open_pages(geom.page_size_pt) as pages:
@@ -692,13 +704,19 @@ class Win32Backend(PrinterBackend):
                     collate=opts.collate is not False,
                     duplex=opts.duplex in (DuplexMode.TWO_SIDED_LONG_EDGE, DuplexMode.TWO_SIDED_SHORT_EDGE),
                 )
+                total_sheets = len(sheets)
                 grayscale = opts.color_mode == ColorMode.MONOCHROME
                 job_id = api.StartDoc(hdc, (title, None, None, 0))
                 try:
-                    for sheet in sheets:
+                    for idx, sheet in enumerate(sheets, start=1):
+                        if opts.progress_callback:
+                            try:
+                                opts.progress_callback(idx, total_sheets)
+                            except Exception as pe:
+                                logger.warning("Progress callback error: %s", pe)
                         api.StartPage(hdc)
                         for placement in layout_sheet(sheet, geom, opts):
-                            self._draw(hdc, render_placement(placement, geom, grayscale), placement.rect)
+                            self._draw(hdc, render_placement(placement, geom, grayscale, dpi=opts.dpi), placement.rect)
                         api.EndPage(hdc)
                     api.EndDoc(hdc)
                 except Exception:
@@ -834,4 +852,20 @@ class Win32Backend(PrinterBackend):
         except SpoolerUnavailableError:
             raise
         except Exception:
+            return False
+
+    def open_printer_preferences(self, printer_name: str) -> bool:
+        """
+        Open the native Windows printing preferences dialog for the printer:
+        rundll32.exe printui.dll,PrintUIEntry /e /n "<printer>"
+        """
+        import subprocess
+
+        self._api()
+        try:
+            cmd = ["rundll32.exe", "printui.dll,PrintUIEntry", "/e", "/n", printer_name]
+            subprocess.Popen(cmd)
+            return True
+        except Exception as e:
+            logger.error("Failed to open printer preferences for '%s': %s", printer_name, e)
             return False
